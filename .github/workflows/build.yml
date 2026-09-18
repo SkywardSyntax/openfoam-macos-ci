@@ -21,6 +21,7 @@ jobs:
       OPENFOAM_TAG: ${{ github.event.inputs.openfoam_version || 'v2606' }}
       APP_NAME: OpenFOAM-v2606
       VOLUME_NAME: OpenFOAM-Build
+      FOAM_CACHE_FILE: /Users/runner/foam-build-cache.tar.gz
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,24 +36,41 @@ jobs:
         run: |
           brew install open-mpi fftw scotch cgal boost gmp mpfr libomp
 
+      - name: Restore built-tree cache
+        id: foam-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FOAM_CACHE_FILE }}
+          key: foam-build-${{ env.OPENFOAM_TAG }}-${{ hashFiles('scripts/configure.sh') }}-v1
+
       - name: Create case-sensitive build volume
         run: |
           hdiutil create -size 40g -fs 'Case-sensitive APFS' -volname "$VOLUME_NAME" build.sparseimage
           hdiutil attach build.sparseimage
           echo "FOAM_SRC_DIR=/Volumes/$VOLUME_NAME/OpenFOAM-${{ env.OPENFOAM_TAG }}" >> "$GITHUB_ENV"
 
+      - name: Restore built tree from cache
+        if: steps.foam-cache.outputs.cache-hit == 'true'
+        run: |
+          echo "Cache hit — extracting cached built tree instead of rebuilding."
+          tar xzf "$FOAM_CACHE_FILE" -C "/Volumes/$VOLUME_NAME"
+          ls "$FOAM_SRC_DIR"
+
       - name: Clone OpenFOAM source
+        if: steps.foam-cache.outputs.cache-hit != 'true'
         run: |
           git clone --branch "OpenFOAM-${OPENFOAM_TAG}" --depth 1 \
             https://gitlab.com/openfoam/core/openfoam.git \
             "$FOAM_SRC_DIR"
 
       - name: Configure for macOS + Homebrew
+        if: steps.foam-cache.outputs.cache-hit != 'true'
         run: |
           cd "$FOAM_SRC_DIR"
           "$GITHUB_WORKSPACE/scripts/configure.sh"
 
       - name: Build (Allwmake)
+        if: steps.foam-cache.outputs.cache-hit != 'true'
         run: |
           set -x
           cd "$FOAM_SRC_DIR"
@@ -67,22 +85,44 @@ jobs:
           ./Allwmake -j -log="$GITHUB_WORKSPACE/allwmake.log"
 
       - name: Upload build log (always, for debugging)
-        if: always()
+        if: always() && steps.foam-cache.outputs.cache-hit != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: allwmake-log
           path: allwmake.log
           retention-days: 14
 
+      - name: Save built tree to cache file
+        if: steps.foam-cache.outputs.cache-hit != 'true'
+        run: |
+          tar czf "$FOAM_CACHE_FILE" \
+            --exclude='OpenFOAM-*/build' \
+            --exclude='OpenFOAM-*/.git' \
+            -C "/Volumes/$VOLUME_NAME" "OpenFOAM-${OPENFOAM_TAG}"
+          ls -lh "$FOAM_CACHE_FILE"
+
       - name: Smoke test (blockMesh / simpleFoam presence + tutorial run)
         run: |
+          set -x
           cd "$FOAM_SRC_DIR"
           source etc/bashrc
-          which blockMesh simpleFoam decomposePar
+          echo "MARKER: sourced bashrc, PATH=$PATH"
+          missing=0
+          for b in blockMesh simpleFoam decomposePar; do
+            if command -v "$b" >/dev/null 2>&1; then
+              echo "FOUND: $b -> $(command -v "$b")"
+            else
+              echo "MISSING: $b"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
+          echo "MARKER: all binaries present"
           run_dir=$(mktemp -d)
           cp -r "$FOAM_SRC_DIR/tutorials/incompressible/simpleFoam/pitzDaily" "$run_dir/case"
           cd "$run_dir/case"
           blockMesh
+          echo "MARKER: blockMesh ok"
           simpleFoam -postProcess -latestTime -func writeCellCentres || true
           echo "Smoke test OK"
 

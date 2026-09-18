@@ -11,7 +11,12 @@ LIBOMP_PREFIX="$(brew --prefix libomp)"
 bin/tools/foamConfigurePaths \
     -system-compiler Clang \
     -sys-openmpi \
-    -with-homebrew \
+    -boost-brew \
+    -cgal-brew \
+    -fftw-brew \
+    -scotch-brew \
+    -gmp-brew \
+    -mpfr-brew \
     -paraview system
 
 # OpenMP: Apple Clang needs libomp from Homebrew explicitly on the include/link paths.

@@ -17,6 +17,8 @@ jobs:
   build:
     runs-on: macos-15   # Apple Silicon (arm64) runner
     timeout-minutes: 300
+    permissions:
+      contents: write   # needed to publish the release
     env:
       OPENFOAM_TAG: ${{ github.event.inputs.openfoam_version || 'v2606' }}
       APP_NAME: OpenFOAM-v2606
@@ -154,6 +156,37 @@ jobs:
           name: ${{ env.APP_NAME }}-macos-arm64
           path: dist/${{ env.APP_NAME }}-macos-arm64.zip
           retention-days: 30
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="OpenFOAM-${OPENFOAM_TAG}"
+          ASSET="dist/${APP_NAME}-macos-arm64.zip"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — replacing asset."
+            gh release upload "$TAG" "$ASSET" --clobber
+          else
+            gh release create "$TAG" "$ASSET" \
+              --title "OpenFOAM ${OPENFOAM_TAG} for macOS (Apple Silicon)" \
+              --notes "Native OpenFOAM ${OPENFOAM_TAG} for Apple Silicon macOS, built from upstream source on a \`macos-15\` runner.
+
+          **Install**
+          1. Download and unzip \`${APP_NAME}-macos-arm64.zip\`
+          2. Move \`${APP_NAME}.app\` to \`/Applications\`
+          3. Install the Homebrew libraries it links against:
+             \`\`\`
+             brew install open-mpi fftw scotch cgal boost gmp mpfr libomp
+             \`\`\`
+
+          Double-clicking the app opens a Terminal with the OpenFOAM environment sourced. It bundles the full \`wmake\` toolchain and headers, so you can compile custom solvers against it.
+
+          **Not included:** ParaView. Install separately with \`brew install --cask paraview\`; OpenFOAM is configured with \`-paraview system\` so \`paraFoam\` will find it.
+
+          Built by [\`.github/workflows/build.yml\`](https://github.com/${{ github.repository }}/blob/main/.github/workflows/build.yml) from commit ${{ github.sha }}."
+          fi
+          gh release view "$TAG" --json url --jq .url
 
       - name: Eject build volume
         if: always()

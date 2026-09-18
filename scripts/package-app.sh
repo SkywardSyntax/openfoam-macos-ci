@@ -34,6 +34,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>1.0</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleExecutable</key><string>launcher</string>
+  <key>CFBundleIconFile</key><string>icon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
@@ -48,13 +49,32 @@ cat > "$MACOS/launcher" <<'LAUNCHER'
 APP_RESOURCES="$(cd "$(dirname "$0")/../Resources" && pwd)"
 FOAM_DIR="$APP_RESOURCES/__APP_NAME__"
 
+# A GUI-launched app inherits a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) that
+# excludes Homebrew, so `brew` must be located by absolute path here.
+BREW=""
+for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew "$(command -v brew 2>/dev/null)"; do
+  if [ -x "$candidate" ]; then BREW="$candidate"; break; fi
+done
+
+if [ -z "$BREW" ]; then
+  osascript -e 'display dialog "Homebrew was not found.
+
+OpenFOAM.app links against Homebrew-provided libraries. Install Homebrew from https://brew.sh, then run:
+
+brew install open-mpi fftw scotch cgal boost gmp mpfr libomp" buttons {"OK"} with icon caution'
+  exit 1
+fi
+
 MISSING=()
 for pkg in open-mpi fftw scotch cgal boost gmp mpfr libomp; do
-  brew --prefix "$pkg" >/dev/null 2>&1 || MISSING+=("$pkg")
+  "$BREW" --prefix "$pkg" >/dev/null 2>&1 || MISSING+=("$pkg")
 done
 
 if [ ${#MISSING[@]} -gt 0 ]; then
-  osascript -e "display dialog \"Missing Homebrew packages: ${MISSING[*]}\n\nInstall with:\nbrew install ${MISSING[*]}\" buttons {\"OK\"} with icon caution"
+  osascript -e "display dialog \"Missing Homebrew packages: ${MISSING[*]}
+
+Install with:
+brew install ${MISSING[*]}\" buttons {\"OK\"} with icon caution"
   exit 1
 fi
 
@@ -68,6 +88,23 @@ LAUNCHER
 
 sed -i '' "s|__APP_NAME__|$APP_NAME|g" "$MACOS/launcher"
 chmod +x "$MACOS/launcher"
+
+# Build icon.icns from the committed 1024px master using only built-in macOS tools
+ICON_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/icon/icon-1024.png"
+if [ -f "$ICON_SRC" ]; then
+  ICONSET="$(mktemp -d)/icon.iconset"
+  mkdir -p "$ICONSET"
+  for spec in "16:16x16" "32:16x16@2x" "32:32x32" "64:32x32@2x" \
+              "128:128x128" "256:128x128@2x" "256:256x256" "512:256x256@2x" \
+              "512:512x512" "1024:512x512@2x"; do
+    px="${spec%%:*}"; name="${spec##*:}"
+    sips -z "$px" "$px" "$ICON_SRC" --out "$ICONSET/icon_${name}.png" >/dev/null
+  done
+  iconutil --convert icns --output "$RES/icon.icns" "$ICONSET"
+  echo "Icon built: $RES/icon.icns"
+else
+  echo "WARNING: $ICON_SRC not found; app will use the default icon."
+fi
 
 echo "Ad-hoc code-signing (required for Gatekeeper on Apple Silicon)..."
 xattr -c -r "$APP"

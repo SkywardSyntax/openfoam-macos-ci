@@ -24,6 +24,11 @@ jobs:
       APP_NAME: OpenFOAM-v2606
       VOLUME_NAME: OpenFOAM-Build
       FOAM_CACHE_FILE: /Users/runner/foam-build-cache.tar.gz
+      PARAVIEW_VERSION: 6.1.1
+      PARAVIEW_SERIES: v6.1
+      PARAVIEW_DMG_NAME: ParaView-6.1.1-MPI-OSX11.0-Python3.12-arm64.dmg
+      PARAVIEW_DMG: /Users/runner/paraview.dmg
+      PARAVIEW_MNT: /Users/runner/pvmnt
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -111,6 +116,39 @@ jobs:
           path: ${{ env.FOAM_CACHE_FILE }}
           key: foam-build-${{ env.OPENFOAM_TAG }}-${{ hashFiles('scripts/configure.sh') }}-v1
 
+      - name: Restore ParaView download cache
+        id: pv-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.PARAVIEW_DMG }}
+          key: paraview-${{ env.PARAVIEW_VERSION }}-arm64
+
+      - name: Download ParaView (official prebuilt arm64 binary)
+        if: steps.pv-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fL --retry 3 -o "$PARAVIEW_DMG" \
+            "https://www.paraview.org/paraview-downloads/download.php?submit=Download&version=${PARAVIEW_SERIES}&type=binary&os=macOS&downloadFile=${PARAVIEW_DMG_NAME}"
+          ls -lh "$PARAVIEW_DMG"
+
+      - name: Save ParaView download cache
+        if: steps.pv-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.PARAVIEW_DMG }}
+          key: paraview-${{ env.PARAVIEW_VERSION }}-arm64
+
+      - name: Mount ParaView image
+        run: |
+          mkdir -p "$PARAVIEW_MNT"
+          # The ParaView image carries a license agreement, which blocks a
+          # non-interactive attach unless acceptance is piped in.
+          yes | hdiutil attach "$PARAVIEW_DMG" \
+            -nobrowse -noverify -noautoopen -mountpoint "$PARAVIEW_MNT" >/dev/null
+          PV_APP="$(find "$PARAVIEW_MNT" -maxdepth 1 -name 'ParaView*.app' | head -1)"
+          [ -n "$PV_APP" ] || { echo "No ParaView.app found in image"; exit 1; }
+          echo "PARAVIEW_APP=$PV_APP" >> "$GITHUB_ENV"
+          echo "Found $PV_APP"
+
       - name: Smoke test (blockMesh / simpleFoam presence + tutorial run)
         run: |
           set -x
@@ -139,11 +177,43 @@ jobs:
           simpleFoam -postProcess -latestTime -func writeCellCentres || true
           echo "Smoke test OK"
 
-      - name: Package .app
+      - name: Package .app (with bundled ParaView)
         run: |
           mkdir -p "$GITHUB_WORKSPACE/dist"
           FOAM_SRC_DIR="$FOAM_SRC_DIR" APP_NAME="$APP_NAME" OUTPUT_DIR="$GITHUB_WORKSPACE/dist" \
+          PARAVIEW_APP="$PARAVIEW_APP" \
             "$GITHUB_WORKSPACE/scripts/package-app.sh"
+          du -sh "$GITHUB_WORKSPACE/dist/${APP_NAME}.app"
+
+      - name: Verify bundled ParaView through the real user session
+        run: |
+          APP_RES="$GITHUB_WORKSPACE/dist/${APP_NAME}.app/Contents/Resources"
+          run_dir=$(mktemp -d)
+          cp -r "$FOAM_SRC_DIR/tutorials/incompressible/simpleFoam/pitzDaily" "$run_dir/case"
+
+          cat > /tmp/pvcheck.py <<'PY'
+          from paraview.simple import OpenFOAMReader
+          r = OpenFOAMReader(FileName='case.foam'); r.UpdatePipeline()
+          d = r.GetDataInformation()
+          assert d.GetNumberOfCells() > 0, 'reader returned an empty mesh'
+          print('PARAVIEW_READER_OK cells=%d' % d.GetNumberOfCells())
+          PY
+
+          # Exercise exactly what a user gets when they open the app.
+          /bin/bash --rcfile "$APP_RES/openfoam-session.sh" -i -c "
+            set -x
+            cd '$run_dir/case' || exit 1
+            blockMesh > /dev/null || exit 1
+            touch case.foam
+            command -v paraview | grep -q '$APP_RES/pvbin' \
+              || { echo 'FAIL: paraview does not resolve to the bundle'; exit 1; }
+            command -v mpirun | grep -q '^/opt/homebrew' \
+              || { echo 'FAIL: ParaView MPICH shadowed OpenFOAM OpenMPI'; exit 1; }
+            pvpython /tmp/pvcheck.py || exit 1
+          " 2>&1 | tee /tmp/pvcheck.log
+
+          grep -q PARAVIEW_READER_OK /tmp/pvcheck.log \
+            || { echo "ParaView verification did not succeed"; exit 1; }
 
       - name: Zip .app
         run: |
@@ -180,14 +250,16 @@ jobs:
              brew install open-mpi fftw scotch cgal boost gmp mpfr libomp
              \`\`\`
 
-          Double-clicking the app opens a Terminal with the OpenFOAM environment sourced. It bundles the full \`wmake\` toolchain and headers, so you can compile custom solvers against it.
+          Double-clicking the app opens a Terminal with the OpenFOAM environment sourced, in your run directory. It bundles the full \`wmake\` toolchain and headers, so you can compile custom solvers against it.
 
-          **Not included:** ParaView. Install separately with \`brew install --cask paraview\`; OpenFOAM is configured with \`-paraview system\` so \`paraFoam\` will find it.
+          **ParaView ${PARAVIEW_VERSION} is bundled** (official prebuilt arm64 build, not recompiled). From a case directory run \`paraFoam -builtin\` to open it, or use \`pvpython\`/\`pvbatch\` for scripted post-processing. Only ParaView's front-end tools are placed on \`PATH\` — its bundled MPICH \`mpiexec\` is deliberately kept off, so it cannot shadow the OpenMPI that OpenFOAM's parallel runs use.
 
           Built by [\`.github/workflows/build.yml\`](https://github.com/${{ github.repository }}/blob/main/.github/workflows/build.yml) from commit ${{ github.sha }}."
           fi
           gh release view "$TAG" --json url --jq .url
 
-      - name: Eject build volume
+      - name: Eject build volume and ParaView image
         if: always()
-        run: hdiutil eject "/Volumes/$VOLUME_NAME" || true
+        run: |
+          hdiutil eject "/Volumes/$VOLUME_NAME" || true
+          hdiutil detach "$PARAVIEW_MNT" || true

@@ -23,6 +23,25 @@ rsync -a \
   --exclude='/build' \
   "$FOAM_SRC_DIR"/ "$RES/$APP_NAME/"
 
+# Optionally bundle a prebuilt ParaView.app (PARAVIEW_APP=/path/to/ParaView-x.y.z.app).
+# Only the front-end tools are exposed on PATH via a shim dir: ParaView ships its
+# own MPICH mpiexec, which would shadow OpenFOAM's OpenMPI and break parallel runs.
+if [ -n "${PARAVIEW_APP:-}" ] && [ -d "$PARAVIEW_APP" ]; then
+  echo "Bundling ParaView from $PARAVIEW_APP ..."
+  rsync -a "$PARAVIEW_APP"/ "$RES/ParaView.app/"
+  mkdir -p "$RES/pvbin"
+  for tool in paraview pvpython pvbatch pvserver; do
+    if [ -x "$RES/ParaView.app/Contents/MacOS/$tool" ]; then
+      ln -sf "../ParaView.app/Contents/MacOS/$tool" "$RES/pvbin/$tool"
+    elif [ -x "$RES/ParaView.app/Contents/bin/$tool" ]; then
+      ln -sf "../ParaView.app/Contents/bin/$tool" "$RES/pvbin/$tool"
+    fi
+  done
+  echo "ParaView tools exposed: $(ls "$RES/pvbin" | tr '\n' ' ')"
+else
+  echo "No PARAVIEW_APP given; building without bundled ParaView."
+fi
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -103,6 +122,14 @@ _res="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 set +e
 source "$_res/__APP_NAME__/etc/bashrc"
 
+# Bundled ParaView front-end tools, if present. Deliberately a shim dir holding
+# only paraview/pvpython/pvbatch/pvserver — ParaView's own dirs also contain an
+# MPICH mpiexec that must not shadow OpenFOAM's OpenMPI.
+if [ -d "$_res/pvbin" ]; then
+  PATH="$_res/pvbin:$PATH"
+  export PATH
+fi
+
 mkdir -p "$FOAM_RUN" 2>/dev/null
 cd "$FOAM_RUN" 2>/dev/null || cd "$HOME"
 
@@ -116,7 +143,12 @@ printf '  %sSolvers run inside a case directory%s%s, not here. Start one:%s\n' \
 printf '    %scp -r $FOAM_TUTORIALS/incompressible/simpleFoam/pitzDaily .%s\n' "$_o" "$_r"
 printf '    %scd pitzDaily && blockMesh && simpleFoam%s\n\n' "$_o" "$_r"
 printf '  %scommon%s     blockMesh  snappyHexMesh  simpleFoam  decomposePar\n' "$_d" "$_r"
-printf '  %s           foamInfo <name>%s  docs for any solver or utility\n\n' "$_d" "$_r"
+printf '  %s           foamInfo <name>%s  docs for any solver or utility\n' "$_d" "$_r"
+if command -v paraview >/dev/null 2>&1; then
+  printf '  %sview%s       %sparaFoam -builtin%s  open the current case in ParaView\n' \
+    "$_d" "$_r" "$_o" "$_r"
+fi
+printf '\n'
 unset _o _d _b _r _res
 
 PS1='\[\e[38;5;208m\]OpenFOAM\[\e[0m\]:\[\e[1m\]\W\[\e[0m\]$ '

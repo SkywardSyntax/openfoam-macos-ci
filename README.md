@@ -21,14 +21,24 @@ integration (`-with-homebrew`, `-sys-openmpi`).
    `foamConfigurePaths` at the Homebrew-installed dependencies and Apple Clang.
 4. Runs `./Allwmake -j` to build everything.
 5. Smoke-tests `blockMesh`/`simpleFoam` against the `pitzDaily` tutorial.
-6. Packages the built tree into `dist/OpenFOAM-v2606.app` via
+6. Downloads the official prebuilt ParaView arm64 binary (cached between
+   runs) and bundles it into the app.
+7. Packages the built tree into `dist/OpenFOAM-v2606.app` via
    `scripts/package-app.sh`, ad-hoc code-signs it, zips it, and uploads it
-   as a workflow artifact.
+   as a workflow artifact and a GitHub release asset.
 
-ParaView is **not** compiled from source — OpenFOAM's own build docs call
-that "the most difficult part of any third-party compilation." Install
-ParaView separately (`brew install --cask paraview`) for post-processing;
-OpenFOAM is configured with `-paraview system` so `paraFoam` will find it.
+## ParaView
+
+ParaView is **bundled but not compiled** — OpenFOAM's own build docs call
+building it from source "the most difficult part of any third-party
+compilation," and there's no need: ParaView ships a built-in OpenFOAM
+reader, so the official prebuilt binary works as-is. `paraFoam -builtin`
+opens the current case.
+
+Only `paraview`, `pvpython`, `pvbatch` and `pvserver` are exposed on `PATH`,
+through a shim directory. This is deliberate: ParaView also ships its own
+MPICH `mpiexec`, and putting its `bin` directories on `PATH` would shadow
+the Homebrew OpenMPI that OpenFOAM's parallel runs are built against.
 
 ## Running the workflow
 

@@ -1,0 +1,102 @@
+name: Build OpenFOAM.app for macOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      openfoam_version:
+        description: 'OpenFOAM ESI tag to build (e.g. v2606)'
+        required: false
+        default: 'v2606'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build.yml'
+      - 'scripts/**'
+
+jobs:
+  build:
+    runs-on: macos-15   # Apple Silicon (arm64) runner
+    timeout-minutes: 300
+    env:
+      OPENFOAM_TAG: ${{ github.event.inputs.openfoam_version || 'v2606' }}
+      APP_NAME: OpenFOAM-v2606
+      VOLUME_NAME: OpenFOAM-Build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show runner info
+        run: |
+          uname -m
+          sw_vers
+          brew --version
+
+      - name: Install build dependencies (Homebrew)
+        run: |
+          brew install open-mpi fftw scotch cgal boost gmp mpfr libomp
+
+      - name: Create case-sensitive build volume
+        run: |
+          hdiutil create -size 40g -fs 'Case-sensitive APFS' -volname "$VOLUME_NAME" build.sparseimage
+          hdiutil attach build.sparseimage
+          echo "FOAM_SRC_DIR=/Volumes/$VOLUME_NAME/OpenFOAM-${{ env.OPENFOAM_TAG }}" >> "$GITHUB_ENV"
+
+      - name: Clone OpenFOAM source
+        run: |
+          git clone --branch "OpenFOAM-${OPENFOAM_TAG}" --depth 1 \
+            https://gitlab.com/openfoam/core/openfoam.git \
+            "$FOAM_SRC_DIR"
+
+      - name: Configure for macOS + Homebrew
+        run: |
+          cd "$FOAM_SRC_DIR"
+          "$GITHUB_WORKSPACE/scripts/configure.sh"
+
+      - name: Build (Allwmake)
+        run: |
+          cd "$FOAM_SRC_DIR"
+          source etc/bashrc
+          foamSystemCheck
+          ./Allwmake -j -log="$GITHUB_WORKSPACE/allwmake.log"
+
+      - name: Upload build log (always, for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allwmake-log
+          path: allwmake.log
+          retention-days: 14
+
+      - name: Smoke test (blockMesh / simpleFoam presence + tutorial run)
+        run: |
+          cd "$FOAM_SRC_DIR"
+          source etc/bashrc
+          which blockMesh simpleFoam decomposePar
+          run_dir=$(mktemp -d)
+          cp -r "$FOAM_SRC_DIR/tutorials/incompressible/simpleFoam/pitzDaily" "$run_dir/case"
+          cd "$run_dir/case"
+          blockMesh
+          simpleFoam -postProcess -latestTime -func writeCellCentres || true
+          echo "Smoke test OK"
+
+      - name: Package .app
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          FOAM_SRC_DIR="$FOAM_SRC_DIR" APP_NAME="$APP_NAME" OUTPUT_DIR="$GITHUB_WORKSPACE/dist" \
+            "$GITHUB_WORKSPACE/scripts/package-app.sh"
+
+      - name: Zip .app
+        run: |
+          cd "$GITHUB_WORKSPACE/dist"
+          zip -r --symlinks "${APP_NAME}-macos-arm64.zip" "${APP_NAME}.app"
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-macos-arm64
+          path: dist/${{ env.APP_NAME }}-macos-arm64.zip
+          retention-days: 30
+
+      - name: Eject build volume
+        if: always()
+        run: hdiutil eject "/Volumes/$VOLUME_NAME" || true

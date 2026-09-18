@@ -97,10 +97,11 @@ cat > "$RES/openfoam-session.sh" <<'SESSION'
 _res="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # OpenFOAM's etc/bashrc is not written to be `set -e` safe, and probes for
-# optional tooling (e.g. paraview) that may not be installed.
+# optional tooling (e.g. paraview) that may not be installed. errexit must stay
+# off afterwards too: this shell is interactive, and any failing command (a typo,
+# a solver erroring out) would otherwise close the user's window.
 set +e
 source "$_res/__APP_NAME__/etc/bashrc"
-set -e
 
 mkdir -p "$FOAM_RUN" 2>/dev/null
 cd "$FOAM_RUN" 2>/dev/null || cd "$HOME"
@@ -110,7 +111,8 @@ printf '\n  %sOpenFOAM %s%s  %s· Apple Silicon native%s\n\n' \
   "$_b" "$WM_PROJECT_VERSION" "$_r" "$_d" "$_r"
 printf '  %srun dir%s    %s  %s← you are here%s\n' "$_d" "$_r" "$FOAM_RUN" "$_d" "$_r"
 printf '  %stutorials%s  %s\n\n' "$_d" "$_r" "$FOAM_TUTORIALS"
-printf '  %squick start%s\n' "$_b" "$_r"
+printf '  %sSolvers run inside a case directory%s%s, not here. Start one:%s\n' \
+  "$_b" "$_r" "$_d" "$_r"
 printf '    %scp -r $FOAM_TUTORIALS/incompressible/simpleFoam/pitzDaily .%s\n' "$_o" "$_r"
 printf '    %scd pitzDaily && blockMesh && simpleFoam%s\n\n' "$_o" "$_r"
 printf '  %scommon%s     blockMesh  snappyHexMesh  simpleFoam  decomposePar\n' "$_d" "$_r"

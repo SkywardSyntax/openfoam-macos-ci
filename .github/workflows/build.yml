@@ -209,6 +209,8 @@ jobs:
               || { echo 'FAIL: paraview does not resolve to the bundle'; exit 1; }
             command -v mpirun | grep -q '^/opt/homebrew' \
               || { echo 'FAIL: ParaView MPICH shadowed OpenFOAM OpenMPI'; exit 1; }
+            command -v foamView >/dev/null \
+              || { echo 'FAIL: foamView helper missing'; exit 1; }
             pvpython /tmp/pvcheck.py || exit 1
           " 2>&1 | tee /tmp/pvcheck.log
 

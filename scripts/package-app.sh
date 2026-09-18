@@ -37,6 +37,64 @@ if [ -n "${PARAVIEW_APP:-}" ] && [ -d "$PARAVIEW_APP" ]; then
       ln -sf "../ParaView.app/Contents/bin/$tool" "$RES/pvbin/$tool"
     fi
   done
+  # ParaView requires the user to press Apply, pick a timestep and choose an
+  # array before anything appears. foamView does all three for the case in $PWD.
+  cat > "$RES/foamview_startup.py" <<'PVSTARTUP'
+"""ParaView startup script: load the OpenFOAM case in $FOAMVIEW_CASE, apply it,
+jump to the last time, and colour by velocity (or the first field found)."""
+import os
+from paraview.simple import *
+
+case = os.environ.get("FOAMVIEW_CASE", os.getcwd())
+stub = os.path.join(case, os.path.basename(case) + ".foam")
+open(stub, "a").close()
+
+r = OpenFOAMReader(registrationName=os.path.basename(stub), FileName=stub)
+r.MeshRegions = ["internalMesh"]
+r.UpdatePipeline()
+
+view = GetActiveViewOrCreate("RenderView")
+times = list(r.TimestepValues or [])
+if times:
+    GetTimeKeeper().Time = times[-1]
+    view.ViewTime = times[-1]
+    scene = GetAnimationScene()
+    scene.UpdateAnimationUsingDataTimeSteps()
+    scene.AnimationTime = times[-1]
+    r.UpdatePipeline(times[-1])
+
+disp = Show(r, view)          # the equivalent of pressing Apply
+
+arrays = {}
+for i in range(r.CellData.GetNumberOfArrays()):
+    a = r.CellData.GetArray(i)
+    arrays[a.Name] = a.GetNumberOfComponents()
+field = "U" if "U" in arrays else next(iter(arrays), None)
+if field:
+    ColorBy(disp, ("CELLS", field, "Magnitude") if arrays[field] > 1 else ("CELLS", field))
+    disp.RescaleTransferFunctionToDataRange(True, False)
+    disp.SetScalarBarVisibility(view, True)
+
+view.InteractionMode = "2D"
+ResetCamera()
+Render()
+print("foamView: %s  t=%s  field=%s" % (case, times[-1] if times else "n/a", field))
+PVSTARTUP
+
+  cat > "$RES/pvbin/foamView" <<'FOAMVIEW'
+#!/bin/bash
+# Open the OpenFOAM case in the current directory in ParaView: applied, at the
+# latest time, coloured by U. Plain `paraFoam -builtin` leaves all three to you.
+_res="$(cd "$(dirname "$0")/.." && pwd)"
+if [ ! -d system ] || [ ! -d constant ]; then
+  echo "foamView: no OpenFOAM case here (expected system/ and constant/)." >&2
+  echo "          cd into a case directory first." >&2
+  exit 1
+fi
+FOAMVIEW_CASE="$PWD" exec "$_res/pvbin/paraview" --script="$_res/foamview_startup.py" "$@"
+FOAMVIEW
+  chmod +x "$RES/pvbin/foamView"
+
   echo "ParaView tools exposed: $(ls "$RES/pvbin" | tr '\n' ' ')"
 else
   echo "No PARAVIEW_APP given; building without bundled ParaView."
@@ -144,8 +202,8 @@ printf '    %scp -r $FOAM_TUTORIALS/incompressible/simpleFoam/pitzDaily .%s\n' "
 printf '    %scd pitzDaily && blockMesh && simpleFoam%s\n\n' "$_o" "$_r"
 printf '  %scommon%s     blockMesh  snappyHexMesh  simpleFoam  decomposePar\n' "$_d" "$_r"
 printf '  %s           foamInfo <name>%s  docs for any solver or utility\n' "$_d" "$_r"
-if command -v paraview >/dev/null 2>&1; then
-  printf '  %sview%s       %sparaFoam -builtin%s  open the current case in ParaView\n' \
+if command -v foamView >/dev/null 2>&1; then
+  printf '  %sview%s       %sfoamView%s  open this case in ParaView, applied, at the last time\n' \
     "$_d" "$_r" "$_o" "$_r"
 fi
 printf '\n'

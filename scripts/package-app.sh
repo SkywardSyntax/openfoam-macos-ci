@@ -78,16 +78,48 @@ brew install ${MISSING[*]}\" buttons {\"OK\"} with icon caution"
   exit 1
 fi
 
+SESSION="$APP_RESOURCES/openfoam-session.sh"
+
 osascript <<EOF
 tell application "Terminal"
   activate
-  do script "source '$FOAM_DIR/etc/bashrc' && echo 'OpenFOAM environment loaded (WM_PROJECT_DIR='\$WM_PROJECT_DIR')' && exec \$SHELL -l"
+  do script "clear; BASH_SILENCE_DEPRECATION_WARNING=1 exec /bin/bash --rcfile '$SESSION' -i"
 end tell
 EOF
 LAUNCHER
 
 sed -i '' "s|__APP_NAME__|$APP_NAME|g" "$MACOS/launcher"
 chmod +x "$MACOS/launcher"
+
+# Interactive session rcfile: what the Terminal window actually runs.
+cat > "$RES/openfoam-session.sh" <<'SESSION'
+# Sourced as the rcfile of the interactive bash session opened by OpenFOAM.app.
+_res="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# OpenFOAM's etc/bashrc is not written to be `set -e` safe, and probes for
+# optional tooling (e.g. paraview) that may not be installed.
+set +e
+source "$_res/__APP_NAME__/etc/bashrc"
+set -e
+
+mkdir -p "$FOAM_RUN" 2>/dev/null
+cd "$FOAM_RUN" 2>/dev/null || cd "$HOME"
+
+_o=$'\e[38;5;208m'; _d=$'\e[2m'; _b=$'\e[1m'; _r=$'\e[0m'
+printf '\n  %sOpenFOAM %s%s  %s· Apple Silicon native%s\n\n' \
+  "$_b" "$WM_PROJECT_VERSION" "$_r" "$_d" "$_r"
+printf '  %srun dir%s    %s  %s← you are here%s\n' "$_d" "$_r" "$FOAM_RUN" "$_d" "$_r"
+printf '  %stutorials%s  %s\n\n' "$_d" "$_r" "$FOAM_TUTORIALS"
+printf '  %squick start%s\n' "$_b" "$_r"
+printf '    %scp -r $FOAM_TUTORIALS/incompressible/simpleFoam/pitzDaily .%s\n' "$_o" "$_r"
+printf '    %scd pitzDaily && blockMesh && simpleFoam%s\n\n' "$_o" "$_r"
+printf '  %scommon%s     blockMesh  snappyHexMesh  simpleFoam  decomposePar\n' "$_d" "$_r"
+printf '  %s           foamInfo <name>%s  docs for any solver or utility\n\n' "$_d" "$_r"
+unset _o _d _b _r _res
+
+PS1='\[\e[38;5;208m\]OpenFOAM\[\e[0m\]:\[\e[1m\]\W\[\e[0m\]$ '
+SESSION
+sed -i '' "s|__APP_NAME__|$APP_NAME|g" "$RES/openfoam-session.sh"
 
 # Build icon.icns from the committed 1024px master using only built-in macOS tools
 ICON_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/icon/icon-1024.png"

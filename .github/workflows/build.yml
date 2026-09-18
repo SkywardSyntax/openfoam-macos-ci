@@ -54,9 +54,16 @@ jobs:
 
       - name: Build (Allwmake)
         run: |
+          set -x
           cd "$FOAM_SRC_DIR"
+          echo "MARKER: cd ok"
+          set +e
           source etc/bashrc
+          rc=$?
+          set -e
+          echo "MARKER: source etc/bashrc rc=$rc"
           foamSystemCheck
+          echo "MARKER: foamSystemCheck ok"
           ./Allwmake -j -log="$GITHUB_WORKSPACE/allwmake.log"
 
       - name: Upload build log (always, for debugging)

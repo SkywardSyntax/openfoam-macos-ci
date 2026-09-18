@@ -42,6 +42,7 @@ jobs:
         with:
           path: ${{ env.FOAM_CACHE_FILE }}
           key: foam-build-${{ env.OPENFOAM_TAG }}-${{ hashFiles('scripts/configure.sh') }}-v1
+          save-always: true
 
       - name: Create case-sensitive build volume
         run: |

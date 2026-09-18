@@ -38,11 +38,10 @@ jobs:
 
       - name: Restore built-tree cache
         id: foam-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.FOAM_CACHE_FILE }}
           key: foam-build-${{ env.OPENFOAM_TAG }}-${{ hashFiles('scripts/configure.sh') }}-v1
-          save-always: true
 
       - name: Create case-sensitive build volume
         run: |
@@ -71,6 +70,7 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/configure.sh"
 
       - name: Build (Allwmake)
+        id: allwmake
         if: steps.foam-cache.outputs.cache-hit != 'true'
         run: |
           set -x
@@ -93,8 +93,8 @@ jobs:
           path: allwmake.log
           retention-days: 14
 
-      - name: Save built tree to cache file
-        if: steps.foam-cache.outputs.cache-hit != 'true'
+      - name: Create cache tarball from built tree
+        if: always() && steps.foam-cache.outputs.cache-hit != 'true' && steps.allwmake.outcome == 'success'
         run: |
           tar czf "$FOAM_CACHE_FILE" \
             --exclude='OpenFOAM-*/build' \
@@ -102,12 +102,22 @@ jobs:
             -C "/Volumes/$VOLUME_NAME" "OpenFOAM-${OPENFOAM_TAG}"
           ls -lh "$FOAM_CACHE_FILE"
 
+      - name: Save built-tree cache
+        if: always() && steps.foam-cache.outputs.cache-hit != 'true' && steps.allwmake.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.FOAM_CACHE_FILE }}
+          key: foam-build-${{ env.OPENFOAM_TAG }}-${{ hashFiles('scripts/configure.sh') }}-v1
+
       - name: Smoke test (blockMesh / simpleFoam presence + tutorial run)
         run: |
           set -x
           cd "$FOAM_SRC_DIR"
+          set +e
           source etc/bashrc
-          echo "MARKER: sourced bashrc, PATH=$PATH"
+          rc=$?
+          set -e
+          echo "MARKER: sourced bashrc rc=$rc, PATH=$PATH"
           missing=0
           for b in blockMesh simpleFoam decomposePar; do
             if command -v "$b" >/dev/null 2>&1; then

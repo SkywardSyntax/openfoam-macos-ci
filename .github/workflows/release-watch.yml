@@ -1,0 +1,120 @@
+name: Watch for new OpenFOAM releases
+
+# Hourly check of OpenFOAM's upstream tags. When ESI publishes a version we
+# have not shipped yet, dispatch build.yml for it; the build then publishes
+# the GitHub release itself, and that release is what marks the version done.
+#
+# Note: GitHub disables `schedule` triggers in a repository with no commit
+# activity for 60 days, and re-enables them from the Actions tab.
+
+on:
+  schedule:
+    # :23 rather than :00 — the top of the hour is the most congested slot
+    # in GitHub's scheduler and runs there are routinely delayed.
+    - cron: '23 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Dispatch a build even if that version is already released'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read     # read this repo's releases
+  actions: write     # dispatch build.yml
+  issues: read       # check for an open failure issue on this version
+
+concurrency:
+  group: release-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve newest upstream OpenFOAM release
+        id: upstream
+        run: |
+          TAG="$(./scripts/latest-openfoam-tag.sh)"
+          echo "Newest upstream release: OpenFOAM-$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to build
+        id: decide
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          REL="OpenFOAM-$TAG"
+          skip() { echo "reason=$1" >> "$GITHUB_OUTPUT"; echo "build=false" >> "$GITHUB_OUTPUT"; echo "SKIP: $1"; }
+
+          # 1. Already shipped? A release only exists once build.yml has
+          #    uploaded the app to it, so this is the source of truth. Check
+          #    the asset too: an empty release means a half-finished publish.
+          if ASSETS="$(gh release view "$REL" --json assets --jq '.assets[].name' 2>/dev/null)"; then
+            if echo "$ASSETS" | grep -q 'macos-arm64\.zip$'; then
+              if [ "$FORCE" = "true" ]; then
+                echo "$REL is already released, but force was requested."
+              else
+                skip "$REL is already released with a macos-arm64 asset."
+                exit 0
+              fi
+            else
+              echo "$REL exists but carries no macos-arm64 asset — rebuilding."
+            fi
+          else
+            echo "$REL has not been released here yet."
+          fi
+
+          # 2. A build already running? macOS runners bill at 10x and a full
+          #    build takes hours, so never let hourly ticks stack up.
+          RUNNING="$(gh run list --workflow=build.yml --json status,databaseId \
+            --jq '[.[] | select(.status != "completed")] | length')"
+          if [ "$RUNNING" -gt 0 ]; then
+            skip "A build.yml run is already queued or in progress."
+            exit 0
+          fi
+
+          # 3. Known-bad version? build.yml files an issue when it fails, so
+          #    without this the watcher would burn a multi-hour macOS build
+          #    every hour on a version that cannot succeed. Close the issue to
+          #    ask for a retry.
+          OPEN="$(gh issue list --state open --label build-failure \
+            --json title --jq "[.[] | select(.title == \"Build failed: $REL\")] | length" 2>/dev/null || echo 0)"
+          if [ "${OPEN:-0}" -gt 0 ]; then
+            skip "An open build-failure issue exists for $REL — close it to retry."
+            exit 0
+          fi
+
+          echo "build=true" >> "$GITHUB_OUTPUT"
+          echo "reason=Dispatching a build for $REL." >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch the build
+        if: steps.decide.outputs.build == 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          gh workflow run build.yml --ref "${{ github.ref_name }}" -f "openfoam_version=$TAG"
+          echo "Dispatched build.yml for OpenFOAM-$TAG"
+
+      - name: Summary
+        if: always()
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          {
+            echo "### OpenFOAM release watch"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Newest upstream | \`OpenFOAM-${TAG:-unknown}\` |"
+            echo "| Action | ${{ steps.decide.outputs.build == 'true' && 'dispatched a build' || 'no build' }} |"
+            echo "| Reason | ${{ steps.decide.outputs.reason }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

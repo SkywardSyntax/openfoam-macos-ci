@@ -40,15 +40,62 @@ through a shim directory. This is deliberate: ParaView also ships its own
 MPICH `mpiexec`, and putting its `bin` directories on `PATH` would shadow
 the Homebrew OpenMPI that OpenFOAM's parallel runs are built against.
 
-## Running the workflow
+Every build verifies the bundle end to end: it opens the real user session,
+checks that `paraview` resolves inside the app and that MPICH has not shadowed
+OpenMPI, then runs `pvpython` against a meshed `pitzDaily` case and asserts the
+OpenFOAM reader returns a non-empty mesh.
+
+The ParaView version is **pinned** in `build.yml`
+(`PARAVIEW_VERSION` / `PARAVIEW_DMG_NAME`, currently 6.1.1). The release
+watcher only tracks OpenFOAM, so bumping ParaView is a manual two-line edit;
+older ParaView downloads stay available, so the pin never breaks on its own.
+
+## Automatic release tracking
+
+`.github/workflows/release-watch.yml` runs **hourly** (`cron: '23 * * * *'`)
+and ships new OpenFOAM versions without anyone pressing a button:
+
+1. Reads OpenFOAM's upstream tags with `scripts/latest-openfoam-tag.sh` and
+   takes the newest release (`OpenFOAM-vYYMM`, or a `.NNNNNN` patch tag on
+   top of one).
+2. If this repo already has a GitHub release for that version *carrying a
+   `macos-arm64.zip` asset*, there is nothing to do. The release is the
+   state — no separate version file to drift out of sync.
+3. Otherwise it dispatches `build.yml` with `openfoam_version=<tag>`, and
+   that workflow builds, verifies and publishes the release itself.
+
+Three guards keep the hourly tick from stacking up multi-hour macOS builds
+(which bill at 10x):
+
+- The watcher refuses to dispatch while any `build.yml` run is queued or
+  in progress.
+- `build.yml` has a `concurrency` group keyed by the OpenFOAM version, as a
+  backstop against a manual re-dispatch of a build already running.
+- On failure `build.yml` opens an issue labelled `build-failure` titled
+  `Build failed: OpenFOAM-<tag>`, and the watcher skips any version that has
+  one open. **Close the issue to ask for a retry** — the next hourly tick
+  picks it up. A later successful build closes it automatically.
+
+GitHub disables `schedule` triggers in a repository with no commit activity
+for 60 days; re-enable them from the Actions tab.
+
+## Running the workflow by hand
 
 ```
-gh workflow run build.yml
+gh workflow run build.yml -f openfoam_version=v2606
 gh run watch
 ```
 
-Or trigger it from the Actions tab (workflow_dispatch), optionally overriding
-the `openfoam_version` input (defaults to `v2606`).
+Or force the watcher to re-evaluate right now:
+
+```
+gh workflow run release-watch.yml              # respects "already released"
+gh workflow run release-watch.yml -f force=true  # rebuild even if released
+```
+
+Both are also available from the Actions tab. The build's app name, release
+tag and asset name are all derived from `openfoam_version`, so no file needs
+editing to ship a new version.
 
 ## Using the built app
 

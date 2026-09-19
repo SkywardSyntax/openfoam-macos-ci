@@ -10,8 +10,20 @@ on:
   push:
     branches: [main]
     paths:
+      # Deliberately not 'scripts/**': scripts/latest-openfoam-tag.sh only
+      # feeds the release watcher, and editing it must not kick off a
+      # multi-hour macOS build.
       - '.github/workflows/build.yml'
-      - 'scripts/**'
+      - 'scripts/configure.sh'
+      - 'scripts/package-app.sh'
+      - 'icon/**'
+
+# One build per OpenFOAM version. The hourly release watcher also refuses to
+# dispatch while a build is running, but this is the backstop that keeps a
+# manual re-dispatch from running the same multi-hour build twice over.
+concurrency:
+  group: build-${{ github.event.inputs.openfoam_version || 'v2606' }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -19,9 +31,10 @@ jobs:
     timeout-minutes: 300
     permissions:
       contents: write   # needed to publish the release
+      issues: write     # file/close the build-failure issue the watcher reads
     env:
       OPENFOAM_TAG: ${{ github.event.inputs.openfoam_version || 'v2606' }}
-      APP_NAME: OpenFOAM-v2606
+      APP_NAME: OpenFOAM-${{ github.event.inputs.openfoam_version || 'v2606' }}
       VOLUME_NAME: OpenFOAM-Build
       FOAM_CACHE_FILE: /Users/runner/foam-build-cache.tar.gz
       PARAVIEW_VERSION: 6.1.1
@@ -259,6 +272,51 @@ jobs:
           Built by [\`.github/workflows/build.yml\`](https://github.com/${{ github.repository }}/blob/main/.github/workflows/build.yml) from commit ${{ github.sha }}."
           fi
           gh release view "$TAG" --json url --jq .url
+
+      - name: File a build-failure issue (unattended runs have nobody watching)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="Build failed: OpenFOAM-${OPENFOAM_TAG}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          # The watcher skips any version with an open issue under this label,
+          # so creating it here is also what stops an hourly retry loop from
+          # burning a multi-hour macOS build on a version that cannot succeed.
+          gh label create build-failure --color B60205 \
+            --description "An OpenFOAM build failed; the release watcher will not retry" \
+            >/dev/null 2>&1 || true
+
+          NUM="$(gh issue list --state open --label build-failure --json number,title \
+            --jq "[.[] | select(.title == \"$TITLE\")] | .[0].number // empty")"
+
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body "Another attempt failed: $RUN_URL"
+          else
+            gh issue create --title "$TITLE" --label build-failure --body "\
+          The build for \`OpenFOAM-${OPENFOAM_TAG}\` failed.
+
+          - Run: $RUN_URL
+          - Triggered by: \`${{ github.event_name }}\`
+          - Commit: ${{ github.sha }}
+
+          The hourly release watcher will **not** retry this version while this
+          issue is open. Fix the build (or decide to skip the version), then
+          close this issue to let the next hourly tick try again."
+          fi
+
+      - name: Close the failure issue now that this version builds
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="Build failed: OpenFOAM-${OPENFOAM_TAG}"
+          NUM="$(gh issue list --state open --label build-failure --json number,title \
+            --jq "[.[] | select(.title == \"$TITLE\")] | .[0].number // empty" 2>/dev/null || true)"
+          if [ -n "$NUM" ]; then
+            gh issue close "$NUM" --comment "Fixed — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} published the release."
+          fi
 
       - name: Eject build volume and ParaView image
         if: always()

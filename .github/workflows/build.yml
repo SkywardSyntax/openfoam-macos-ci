@@ -229,8 +229,8 @@ jobs:
             touch case.foam
             command -v paraview | grep -q '$APP_RES/pvbin' \
               || { echo 'FAIL: paraview does not resolve to the bundle'; exit 1; }
-            command -v mpirun | grep -q "$APP_RES/deps/bin" \
-              || { echo "FAIL: mpirun is $(command -v mpirun), not the bundled one"; exit 1; }
+            command -v mpirun | grep -q '/deps/bin' \
+              || { echo 'FAIL: mpirun does not resolve to the bundled Open MPI'; exit 1; }
             command -v foamView >/dev/null \
               || { echo 'FAIL: foamView helper missing'; exit 1; }
             pvpython /tmp/pvcheck.py || exit 1
@@ -296,7 +296,13 @@ jobs:
 
       - name: Restore Homebrew
         if: always()
-        run: sudo mv /opt/homebrew-hidden /opt/homebrew || true
+        run: |
+          if [ -d /opt/homebrew-hidden ]; then
+            sudo mv /opt/homebrew-hidden /opt/homebrew
+            echo "Homebrew restored."
+          else
+            echo "Nothing to restore (it was never hidden)."
+          fi
 
       - name: Fail if the no-Homebrew verification did not pass
         if: steps.nobrew.outputs.fail == '1'

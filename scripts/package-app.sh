@@ -158,28 +158,34 @@ _res="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # optional tooling (e.g. paraview) that may not be installed. errexit must stay
 # off afterwards too: this shell is interactive, and any failing command (a typo,
 # a solver erroring out) would otherwise close the user's window.
+# The bundled MPI has to be on PATH *before* etc/bashrc is sourced. OpenFOAM's
+# own etc/config.sh/mpi discovers the MPI prefix by looking for mpicc while it
+# sources, and otherwise warns "could not determine prefix for system-openmpi"
+# and leaves parallel runs unconfigured.
+#
+# Open MPI and PRRTE also have their install prefix compiled in; OPAL_PREFIX
+# and PRTE_PREFIX are the documented overrides that let the relocated copies
+# find their own plugins and helper daemons from inside the bundle.
+if [ -d "$_res/deps" ]; then
+  _deps="$_res/deps"
+  PATH="$_deps/bin:$PATH"
+  export PATH
+  export OPAL_PREFIX="$_deps" PRTE_PREFIX="$_deps" PMIX_PREFIX="$_deps"
+fi
+
 set +e
 source "$_res/__APP_NAME__/etc/bashrc"
 
-# Bundled third-party dependencies. OpenFOAM's etc/config.sh/{CGAL,FFTW,scotch}
-# resolve these with `brew --prefix`, which yields nothing on a machine with no
-# Homebrew — so override them here, after sourcing, with the copies inside the
-# app. Runtime linking does not depend on this (install names were rewritten to
-# @rpath at package time); these are what let `wmake` build custom solvers.
-if [ -d "$_res/deps" ]; then
-  _deps="$_res/deps"
+# These, by contrast, must be set *after* sourcing: etc/config.sh/{CGAL,FFTW,
+# scotch} assign them from `brew --prefix`, which yields nothing on a machine
+# with no Homebrew, so anything set earlier would just be overwritten. Runtime
+# linking does not depend on them (install names were rewritten to @rpath at
+# package time); they are what `wmake` reads.
+if [ -n "${_deps:-}" ]; then
   export BOOST_ARCH_PATH="$_deps"  CGAL_ARCH_PATH="$_deps" \
          GMP_ARCH_PATH="$_deps"    MPFR_ARCH_PATH="$_deps" \
          SCOTCH_ARCH_PATH="$_deps" FFTW_ARCH_PATH="$_deps" \
          MPI_ARCH_PATH="$_deps"
-
-  # Open MPI and PRRTE have their install prefix compiled in; these are the
-  # documented overrides that let the relocated copies find their own plugins
-  # and helper daemons from inside the bundle.
-  export OPAL_PREFIX="$_deps" PRTE_PREFIX="$_deps" PMIX_PREFIX="$_deps"
-
-  PATH="$_deps/bin:$PATH"
-  export PATH
   unset _deps
 fi
 

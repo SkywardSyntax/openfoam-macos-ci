@@ -122,8 +122,9 @@ there is nothing to `brew install`.
    PRRTE's `prted` daemon, which Homebrew ships as a *separate* formula.
    Both have their prefix compiled in, which is why the session rcfile sets
    `OPAL_PREFIX`/`PRTE_PREFIX` — the documented relocation hooks.
-4. Bundles the **headers** (~235 MB, mostly Boost and CGAL) so `wmake` can
-   build custom solvers with no Homebrew present.
+4. Bundles the **headers** (~235 MB, mostly Boost and CGAL) for `wmake`.
+   Note the case-sensitivity limitation below: these are necessary for
+   compiling custom solvers but not currently sufficient.
 5. Rewrites every Homebrew install name to `@rpath/...` and adds an
    `@loader_path`-relative `LC_RPATH`, computed per file — binaries sit at
    several depths, so `libPstream` in `lib/sys-openmpi/` needs a different
@@ -152,11 +153,35 @@ runner has it installed. So CI **deletes Homebrew from the runner**
 solver compiled from source with `wmake`. Homebrew is restored in an
 `always()` step.
 
-### The one thing still not bundled
+### Known limitation: compiling custom solvers
 
-Compiling custom solvers needs a C++ compiler, and an app cannot ship
-Apple's. If you want to build your own solvers, you need the Command Line
-Tools (`xcode-select --install`). Running the prebuilt solvers does not.
+Running the prebuilt solvers works with no Homebrew and no Xcode. **Building
+your own solver against the packaged app currently does not**, for a reason
+unrelated to Homebrew.
+
+OpenFOAM's `lnInclude` directories contain headers named `wchar.H`,
+`time.H`, `string.H` and `complex.H`. On a case-insensitive filesystem —
+which is what every stock Mac uses — `#include <wchar.h>` resolves to
+OpenFOAM's C++ header instead of libc's, and the compile dies with:
+
+```
+<cwchar> tried including <wchar.h> but didn't find libc++'s <wchar.h> header.
+```
+
+This is exactly why step 2 of the build creates a **case-sensitive** APFS
+image to compile OpenFOAM in the first place. The hazard comes back as soon
+as the tree is packaged into a `.app` sitting on a normal volume, and
+bundling headers does not fix it — the compile fails before it ever reaches
+them. CI attempts the compile on every build and reports the result, but
+does not gate on it.
+
+Fixing this properly means putting the source tree on a case-sensitive
+volume on the user's machine — for example shipping a case-sensitive disk
+image the app mounts, or a setup command that creates one. That is not
+implemented yet.
+
+(Compiling would also need Apple's Command Line Tools, `xcode-select
+--install`, since an app cannot ship a compiler.)
 
 ## Using the built app
 
@@ -164,6 +189,7 @@ Download the `OpenFOAM-v2606.app` artifact from the completed run, unzip, and
 move it to `/Applications`.
 
 Double-clicking the app opens a Terminal with the OpenFOAM environment
-sourced (`blockMesh`, `simpleFoam`, etc. on `PATH`). It also contains the
-full `wmake` toolchain and headers, so you can compile custom solvers
-against it.
+sourced (`blockMesh`, `simpleFoam`, etc. on `PATH`), including parallel runs
+through the bundled Open MPI. It also carries the full `wmake` toolchain and
+the third-party headers — but see the case-sensitivity limitation above
+before relying on compiling your own solvers.

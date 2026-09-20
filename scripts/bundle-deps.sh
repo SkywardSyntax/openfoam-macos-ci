@@ -113,6 +113,11 @@ for formula in open-mpi prrte pmix hwloc libevent; do
     --exclude 'INSTALL_RECEIPT.json' --exclude '.brew' \
     "$src"/ "$DEPS"/ 2>/dev/null || true
 done
+# Homebrew installs libraries read-only and rsync -aL preserves the mode, which
+# makes both install_name_tool and `codesign --force` fail on them -- quietly,
+# since those calls tolerate failure.
+chmod -R u+w "$DEPS" 2>/dev/null || true
+
 echo "  mpirun: $([ -x "$DEPS/bin/mpirun" ] && echo present || echo MISSING)"
 echo "  prted:  $([ -x "$DEPS/bin/prted" ] && echo present || echo MISSING)"
 
@@ -186,6 +191,30 @@ while read -r f; do
   count=$((count + 1))
 done < "$TMP/foam_files"
 echo "  patched $count files in the OpenFOAM tree"
+
+# 4d. Sign every Mach-O under deps, unconditionally.
+#
+# fix_macho only re-signs a file it had references to rewrite, but step 4a
+# rewrites the -id of *every* bundled dylib, and that alone invalidates a
+# signature. Leaf libraries with no Homebrew dependencies of their own
+# (libevent, libfftw3, libgmp, libhwloc, liblzma, lib*errexit) therefore came
+# out modified and unsigned. Apple Silicon refuses to load unsigned code, so
+# sign the lot rather than trying to track which were touched.
+echo "Signing bundled Mach-O files..."
+chmod -R u+w "$DEPS" 2>/dev/null || true
+: > "$TMP/unsigned"
+find "$DEPS" -type f 2>/dev/null | while read -r f; do
+  [ -L "$f" ] && continue
+  file -b "$f" 2>/dev/null | grep -q 'Mach-O' || continue
+  codesign --force --sign - "$f" >/dev/null 2>&1
+  codesign --verify "$f" >/dev/null 2>&1 || echo "$f" >> "$TMP/unsigned"
+done
+if [ -s "$TMP/unsigned" ]; then
+  echo "FAIL: $(wc -l < "$TMP/unsigned" | tr -d ' ') bundled Mach-O files are not validly signed:"
+  head -10 "$TMP/unsigned"
+  exit 1
+fi
+echo "  all bundled Mach-O files signed and verified"
 
 # ---------------------------------------------------------------------------
 # 5. Build-time flags for custom solvers.

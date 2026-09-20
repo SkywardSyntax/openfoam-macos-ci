@@ -394,7 +394,7 @@ if grep -q COMPILE_PRODUCED_BINARY "$CBUILD"; then
 elif grep -q "didn't find libc++" "$CBUILD"; then
   known "custom solver compile" "case-insensitive FS: lnInclude shadows libc headers (expected)"
 else
-  known "custom solver compile" "did not build, for an unexpected reason: $(grep -m1 -E 'error:|Error' "$CBUILD" | cut -c1-80)"
+  known "custom solver compile" "did not build: $(grep -m1 -E 'error:|Error' "$CBUILD" | tr -s ' ' | cut -c1-160)"
 fi
 rm -f "$CBUILD" "$BODY" "$OUT"
 rm -rf "$WORK"

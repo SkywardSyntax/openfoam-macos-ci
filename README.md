@@ -156,9 +156,16 @@ APP=/Applications/OpenFOAM-v2606.app scripts/test-app.sh
 It checks bundle structure, self-containment (no Mach-O referencing
 `/opt/homebrew`, valid code signatures), the session environment, ~50 shipped
 executables, which libraries dyld *actually* maps at runtime, then runs
-`blockMesh`, `checkMesh`, `simpleFoam`, `potentialFoam`, `pimpleFoam`, all four
-decomposition methods (scotch, metis, kahip, hierarchical), a 2-way parallel
+`blockMesh`, `checkMesh`, `simpleFoam`, `potentialFoam`, `pimpleFoam`, the
+working decomposition methods (scotch, hierarchical, simple), a 2-way parallel
 solve with `reconstructPar`, and the ParaView reader through `pvpython`.
+
+Note on decomposition: `libmetisDecomp.dylib` and `libkahipDecomp.dylib` are
+present but are **no-op stubs**. OpenFOAM builds those when METIS and KaHIP
+are not available at build time; the library loads and then refuses at run
+time, so the file existing proves nothing. The suite detects the stub message
+explicitly and reports it rather than passing or failing. Real parallel
+decomposition uses **scotch/ptscotch**, which is bundled and works.
 
 Three things make it meaningful rather than decorative:
 

@@ -77,14 +77,19 @@ rm -f "$LEFTOVER"
 
 # Signatures: install_name_tool invalidates them, and Apple Silicon refuses to
 # run an unsigned binary, so this is what catches a missed re-sign.
-SIGBAD=0
+SIGBAD=0; SIGBAD_NAMES=""
 for f in "$DEPS"/lib/*.dylib "$DEPS"/bin/* "$FOAM"/platforms/*/bin/simpleFoam \
          "$FOAM"/platforms/*/lib/libscotchDecomp.dylib; do
   [ -f "$f" ] && [ ! -L "$f" ] || continue
-  codesign --verify "$f" >/dev/null 2>&1 || SIGBAD=$((SIGBAD+1))
+  # Only Mach-O files carry signatures. deps/bin also holds open-mpi's shell
+  # and python wrappers, which rsync -aL turned from symlinks into real files.
+  file -b "$f" 2>/dev/null | grep -q 'Mach-O' || continue
+  if ! codesign --verify "$f" >/dev/null 2>&1; then
+    SIGBAD=$((SIGBAD+1)); SIGBAD_NAMES="$SIGBAD_NAMES $(basename "$f")"
+  fi
 done
 [ "$SIGBAD" -eq 0 ] && ok "code signatures valid on bundled binaries" \
-                    || bad "code signatures valid on bundled binaries" "$SIGBAD invalid"
+                    || bad "code signatures valid on bundled binaries" "$SIGBAD invalid:$SIGBAD_NAMES"
 
 check "mpirun bundled"               test -x "$DEPS/bin/mpirun"
 check "prted bundled (Open MPI 5)"   test -x "$DEPS/bin/prted"
@@ -220,12 +225,20 @@ WORK="$(mktemp -d)"
 BODY="$(mktemp)"
 OUT="$(mktemp)"
 cat > "$BODY" <<'BODYEOF'
-t() { n="$1"; shift; if "$@" >/dev/null 2>&1; then echo "RESULT $n ok"; else echo "RESULT $n fail"; fi; }
+t() {
+  n="$1"; shift
+  if "$@" > /tmp/t.log 2>&1; then
+    echo "RESULT $n ok"
+  else
+    echo "RESULT $n fail :: $(grep -m1 -iE 'error|cannot|no such|not found' /tmp/t.log | tr -s ' ' | cut -c1-90)"
+  fi
+}
 cd "$FOAMTEST_WORK" || exit 1
 
 # --- steady: blockMesh -> checkMesh -> simpleFoam -> postProcess
 cp -r "$FOAM_TUTORIALS/incompressible/simpleFoam/pitzDaily" steady 2>/dev/null
 cd steady || exit 1
+[ -d 0.orig ] && cp -r 0.orig 0
 t blockMesh          blockMesh
 t checkMesh          checkMesh
 t simpleFoam         simpleFoam
@@ -237,13 +250,15 @@ t foamListTimes      foamListTimes
 cd "$FOAMTEST_WORK" || exit 1
 cp -r "$FOAM_TUTORIALS/basic/potentialFoam/pitzDaily" potential 2>/dev/null
 cd potential || exit 1
+[ -d 0.orig ] && cp -r 0.orig 0            # what the tutorial's restore0Dir does
 blockMesh >/dev/null 2>&1
-t potentialFoam      potentialFoam
+t potentialFoam      potentialFoam -writePhi -writep
 
 # --- transient: pimpleFoam, capped to a few steps so this stays quick
 cd "$FOAMTEST_WORK" || exit 1
 cp -r "$FOAM_TUTORIALS/incompressible/pimpleFoam/RAS/pitzDaily" transient 2>/dev/null
 cd transient || exit 1
+[ -d 0.orig ] && cp -r 0.orig 0
 blockMesh >/dev/null 2>&1
 foamDictionary system/controlDict -entry endTime -set 0.001 >/dev/null 2>&1
 foamDictionary system/controlDict -entry writeInterval -set 0.001 >/dev/null 2>&1
@@ -251,7 +266,7 @@ t pimpleFoam         pimpleFoam
 
 # --- parallel, across every decomposition method that was built
 cd "$FOAMTEST_WORK/steady" || exit 1
-for method in scotch metis kahip hierarchical; do
+for method in scotch hierarchical simple; do
   cat > system/decomposeParDict <<DPD
 FoamFile { version 2.0; format ascii; class dictionary; object decomposeParDict; }
 numberOfSubdomains 2;
@@ -259,6 +274,23 @@ method $method;
 coeffs { n (2 1 1); }
 DPD
   t "decompose-$method" decomposePar -force
+done
+# metis and kahip build as no-op stub libraries when the real solvers are not
+# available. The library exists and loads, then refuses at run time, so
+# presence of libmetisDecomp.dylib proves nothing. Report which it is.
+for method in metis kahip; do
+  cat > system/decomposeParDict <<DPD
+FoamFile { version 2.0; format ascii; class dictionary; object decomposeParDict; }
+numberOfSubdomains 2;
+method $method;
+DPD
+  if decomposePar -force > /tmp/dec.log 2>&1; then
+    echo "RESULT decompose-$method ok"
+  elif grep -q 'dummy.*stub library' /tmp/dec.log; then
+    echo "RESULT decompose-$method stub"
+  else
+    echo "RESULT decompose-$method fail :: $(grep -m1 -i error /tmp/dec.log | cut -c1-90)"
+  fi
 done
 
 # Full parallel solve + reconstruct, using scotch
@@ -288,12 +320,14 @@ if ! grep -q '^RESULT ' "$OUT"; then
   bad "functional tests ran at all" "nothing recorded; first output: $(head -3 "$OUT" | tr '\n' ' ' | cut -c1-140)"
 else
 for name in blockMesh checkMesh simpleFoam postProcess foamDictionary foamListTimes \
-            potentialFoam pimpleFoam decompose-scotch decompose-metis decompose-kahip \
-            decompose-hierarchical parallel-simpleFoam reconstructPar; do
+            potentialFoam pimpleFoam decompose-scotch decompose-hierarchical \
+            decompose-simple decompose-metis decompose-kahip \
+            parallel-simpleFoam reconstructPar; do
   line="$(grep -m1 "^RESULT $name " "$OUT" 2>/dev/null)"
   case "$line" in
-    *" ok")   ok "$name";;
-    *" fail") bad "$name" "$(grep -A4 "^RESULT $name fail" "$OUT" | tail -4 | head -2 | tr '\n' ' ')";;
+    *" ok")     ok "$name";;
+    *" stub")   known "$name" "built as a no-op stub; the real library was not available at build time";;
+    *" fail"*)  bad "$name" "${line#*fail}";;
     *)        bad "$name" "no result recorded (an earlier case may have aborted)";;
   esac
 done

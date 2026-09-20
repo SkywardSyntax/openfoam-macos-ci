@@ -166,11 +166,13 @@ _res="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Open MPI and PRRTE also have their install prefix compiled in; OPAL_PREFIX
 # and PRTE_PREFIX are the documented overrides that let the relocated copies
 # find their own plugins and helper daemons from inside the bundle.
+# Exported, and named so OpenFOAM will not touch it: etc/bashrc unsets `_deps`
+# as part of its own cleanup, which silently skipped everything below.
 if [ -d "$_res/deps" ]; then
-  _deps="$_res/deps"
-  PATH="$_deps/bin:$PATH"
+  export FOAMAPP_DEPS="$_res/deps"
+  PATH="$FOAMAPP_DEPS/bin:$PATH"
   export PATH
-  export OPAL_PREFIX="$_deps" PRTE_PREFIX="$_deps" PMIX_PREFIX="$_deps"
+  export OPAL_PREFIX="$FOAMAPP_DEPS" PRTE_PREFIX="$FOAMAPP_DEPS" PMIX_PREFIX="$FOAMAPP_DEPS"
 fi
 
 set +e
@@ -181,11 +183,11 @@ source "$_res/__APP_NAME__/etc/bashrc"
 # with no Homebrew, so anything set earlier would just be overwritten. Runtime
 # linking does not depend on them (install names were rewritten to @rpath at
 # package time); they are what `wmake` reads.
-if [ -n "${_deps:-}" ]; then
-  export BOOST_ARCH_PATH="$_deps"  CGAL_ARCH_PATH="$_deps" \
-         GMP_ARCH_PATH="$_deps"    MPFR_ARCH_PATH="$_deps" \
-         SCOTCH_ARCH_PATH="$_deps" FFTW_ARCH_PATH="$_deps" \
-         MPI_ARCH_PATH="$_deps"
+if [ -n "${FOAMAPP_DEPS:-}" ]; then
+  export BOOST_ARCH_PATH="$FOAMAPP_DEPS"  CGAL_ARCH_PATH="$FOAMAPP_DEPS" \
+         GMP_ARCH_PATH="$FOAMAPP_DEPS"    MPFR_ARCH_PATH="$FOAMAPP_DEPS" \
+         SCOTCH_ARCH_PATH="$FOAMAPP_DEPS" FFTW_ARCH_PATH="$FOAMAPP_DEPS" \
+         MPI_ARCH_PATH="$FOAMAPP_DEPS"
 
   # etc/config.sh/mpi appends $MPI_ARCH_PATH/lib to DYLD_LIBRARY_PATH while it
   # sources, and at that point MPI_ARCH_PATH can still be a Homebrew path.
@@ -195,10 +197,9 @@ if [ -n "${_deps:-}" ]; then
   # not match. Strip Homebrew out and put the bundle first: the bundle wins.
   DYLD_LIBRARY_PATH="$(printf %s "${DYLD_LIBRARY_PATH:-}" | tr ':' '\n' \
     | grep -v -e '^/opt/homebrew' -e '/Homebrew/' | paste -sd: -)"
-  DYLD_LIBRARY_PATH="$_deps/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+  DYLD_LIBRARY_PATH="$FOAMAPP_DEPS/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
   export DYLD_LIBRARY_PATH
 
-  unset _deps
 fi
 
 # Bundled ParaView front-end tools, if present. Deliberately a shim dir holding

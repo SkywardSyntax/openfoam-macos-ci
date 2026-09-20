@@ -185,14 +185,6 @@ jobs:
           echo "MARKER: all binaries present"
           run_dir=$(mktemp -d)
           cp -r "$FOAM_SRC_DIR/tutorials/incompressible/simpleFoam/pitzDaily" "$run_dir/case"
-
-          # scotch decomposition deliberately: libscotch is one of the dylibs
-          # whose install name was rewritten, so this exercises it.
-          cat > "$run_dir/case/system/decomposeParDict" <<'DPD'
-          FoamFile { version 2.0; format ascii; class dictionary; object decomposeParDict; }
-          numberOfSubdomains 2;
-          method scotch;
-          DPD
           cd "$run_dir/case"
           blockMesh
           echo "MARKER: blockMesh ok"
@@ -252,6 +244,14 @@ jobs:
           APP_RES="$GITHUB_WORKSPACE/dist/${APP_NAME}.app/Contents/Resources"
           run_dir=$(mktemp -d)
           cp -r "$FOAM_SRC_DIR/tutorials/incompressible/simpleFoam/pitzDaily" "$run_dir/case"
+
+          # scotch decomposition deliberately: libscotch is one of the dylibs
+          # whose install name was rewritten, so this exercises it.
+          cat > "$run_dir/case/system/decomposeParDict" <<'DPD'
+          FoamFile { version 2.0; format ascii; class dictionary; object decomposeParDict; }
+          numberOfSubdomains 2;
+          method scotch;
+          DPD
 
           # A custom solver. Informational: see the case-sensitivity note below.
           mkdir -p "$run_dir/myApp/Make"

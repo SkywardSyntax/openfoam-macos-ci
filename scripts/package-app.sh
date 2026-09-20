@@ -23,6 +23,12 @@ rsync -a \
   --exclude='/build' \
   "$FOAM_SRC_DIR"/ "$RES/$APP_NAME/"
 
+# Bundle the Homebrew-provided dependencies (dylibs, the MPI runtime and
+# headers) so the shipped app needs no Homebrew at all. Must run before the
+# code-signing step below: it rewrites install names, which invalidates
+# signatures.
+APP="$APP" APP_NAME="$APP_NAME" "$(dirname "${BASH_SOURCE[0]}")/bundle-deps.sh"
+
 # Optionally bundle a prebuilt ParaView.app (PARAVIEW_APP=/path/to/ParaView-x.y.z.app).
 # Only the front-end tools are exposed on PATH via a shim dir: ParaView ships its
 # own MPICH mpiexec, which would shadow OpenFOAM's OpenMPI and break parallel runs.
@@ -126,35 +132,10 @@ cat > "$MACOS/launcher" <<'LAUNCHER'
 APP_RESOURCES="$(cd "$(dirname "$0")/../Resources" && pwd)"
 FOAM_DIR="$APP_RESOURCES/__APP_NAME__"
 
-# A GUI-launched app inherits a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) that
-# excludes Homebrew, so `brew` must be located by absolute path here.
-BREW=""
-for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew "$(command -v brew 2>/dev/null)"; do
-  if [ -x "$candidate" ]; then BREW="$candidate"; break; fi
-done
-
-if [ -z "$BREW" ]; then
-  osascript -e 'display dialog "Homebrew was not found.
-
-OpenFOAM.app links against Homebrew-provided libraries. Install Homebrew from https://brew.sh, then run:
-
-brew install open-mpi fftw scotch cgal boost gmp mpfr libomp" buttons {"OK"} with icon caution'
-  exit 1
-fi
-
-MISSING=()
-for pkg in open-mpi fftw scotch cgal boost gmp mpfr libomp; do
-  "$BREW" --prefix "$pkg" >/dev/null 2>&1 || MISSING+=("$pkg")
-done
-
-if [ ${#MISSING[@]} -gt 0 ]; then
-  osascript -e "display dialog \"Missing Homebrew packages: ${MISSING[*]}
-
-Install with:
-brew install ${MISSING[*]}\" buttons {\"OK\"} with icon caution"
-  exit 1
-fi
-
+# No dependency check: every third-party library this app needs is bundled in
+# Contents/Resources/deps, so there is nothing for the user to install and
+# nothing to verify. A GUI-launched app inherits a minimal PATH that excludes
+# Homebrew anyway.
 SESSION="$APP_RESOURCES/openfoam-session.sh"
 
 osascript <<EOF
@@ -179,6 +160,28 @@ _res="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # a solver erroring out) would otherwise close the user's window.
 set +e
 source "$_res/__APP_NAME__/etc/bashrc"
+
+# Bundled third-party dependencies. OpenFOAM's etc/config.sh/{CGAL,FFTW,scotch}
+# resolve these with `brew --prefix`, which yields nothing on a machine with no
+# Homebrew — so override them here, after sourcing, with the copies inside the
+# app. Runtime linking does not depend on this (install names were rewritten to
+# @rpath at package time); these are what let `wmake` build custom solvers.
+if [ -d "$_res/deps" ]; then
+  _deps="$_res/deps"
+  export BOOST_ARCH_PATH="$_deps"  CGAL_ARCH_PATH="$_deps" \
+         GMP_ARCH_PATH="$_deps"    MPFR_ARCH_PATH="$_deps" \
+         SCOTCH_ARCH_PATH="$_deps" FFTW_ARCH_PATH="$_deps" \
+         MPI_ARCH_PATH="$_deps"
+
+  # Open MPI and PRRTE have their install prefix compiled in; these are the
+  # documented overrides that let the relocated copies find their own plugins
+  # and helper daemons from inside the bundle.
+  export OPAL_PREFIX="$_deps" PRTE_PREFIX="$_deps" PMIX_PREFIX="$_deps"
+
+  PATH="$_deps/bin:$PATH"
+  export PATH
+  unset _deps
+fi
 
 # Bundled ParaView front-end tools, if present. Deliberately a shim dir holding
 # only paraview/pvpython/pvbatch/pvserver — ParaView's own dirs also contain an

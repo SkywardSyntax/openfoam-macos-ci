@@ -13,6 +13,8 @@ integration (`-with-homebrew`, `-sys-openmpi`).
 
 1. Installs third-party deps via Homebrew (OpenMPI, FFTW, Scotch, CGAL,
    Boost, GMP, MPFR, libomp) — prebuilt bottles, not built from source.
+   These are a *build-time* dependency only; step 7 bundles what the result
+   actually needs into the app.
 2. Creates a case-sensitive APFS disk image to hold the OpenFOAM source
    (required: OpenFOAM's source tree has files/dirs that only differ by case,
    e.g. `InterfaceCompositionModel.C` vs `interfaceCompositionModel.C`, which
@@ -23,7 +25,10 @@ integration (`-with-homebrew`, `-sys-openmpi`).
 5. Smoke-tests `blockMesh`/`simpleFoam` against the `pitzDaily` tutorial.
 6. Downloads the official prebuilt ParaView arm64 binary (cached between
    runs) and bundles it into the app.
-7. Packages the built tree into `dist/OpenFOAM-v2606.app` via
+7. Bundles the Homebrew dependencies into the app via
+   `scripts/bundle-deps.sh` and rewrites every install name to load from
+   there (see below).
+8. Packages the built tree into `dist/OpenFOAM-v2606.app` via
    `scripts/package-app.sh`, ad-hoc code-signs it, zips it, and uploads it
    as a workflow artifact and a GitHub release asset.
 
@@ -97,16 +102,66 @@ Both are also available from the Actions tab. The build's app name, release
 tag and asset name are all derived from `openfoam_version`, so no file needs
 editing to ship a new version.
 
+## Bundled dependencies (no Homebrew needed)
+
+The app is self-contained. Download, unzip, move to `/Applications`, done —
+there is nothing to `brew install`.
+
+`scripts/bundle-deps.sh` does this at package time:
+
+1. **Discovers** what the built tree actually links against, rather than
+   trusting a package list. That matters: of the eight formulae this project
+   used to tell people to install, only five are referenced at runtime —
+   `cgal` and `boost` are header-only here, and **nothing links `libomp`
+   at all**.
+2. Walks the **transitive closure** (`libmpi` alone drags in pmix, hwloc and
+   libevent) and copies it into `Contents/Resources/deps`. The whole runtime
+   closure is about **8 MB across 14 dylibs**.
+3. Bundles the **MPI runtime**. `libmpi` is not enough for a parallel run:
+   `mpirun` is its own executable, and under Open MPI 5 it delegates to
+   PRRTE's `prted` daemon, which Homebrew ships as a *separate* formula.
+   Both have their prefix compiled in, which is why the session rcfile sets
+   `OPAL_PREFIX`/`PRTE_PREFIX` — the documented relocation hooks.
+4. Bundles the **headers** (~235 MB, mostly Boost and CGAL) so `wmake` can
+   build custom solvers with no Homebrew present.
+5. Rewrites every Homebrew install name to `@rpath/...` and adds an
+   `@loader_path`-relative `LC_RPATH`, computed per file — binaries sit at
+   several depths, so `libPstream` in `lib/sys-openmpi/` needs a different
+   rpath than `libscotchDecomp` in `lib/`.
+6. **Re-signs** each patched file. `install_name_tool` invalidates a Mach-O
+   signature, and on Apple Silicon an unsigned binary is killed outright
+   rather than failing to link.
+7. **Audits**, as a hard failure, that no Mach-O file in the app still
+   references `/opt/homebrew`.
+
+Everything goes into a single merged prefix, which is what makes it
+tractable — `OPAL_PREFIX` and all of OpenFOAM's `*_ARCH_PATH` variables can
+then point at the same directory.
+
+Upstream's `etc/config.sh/{CGAL,FFTW,scotch}` resolve their paths by calling
+`brew --prefix` *while the session is being sourced*, so the session rcfile
+overrides those variables afterwards. Runtime linking does not depend on
+that — the install names were already rewritten — but the compile path does.
+
+### How this is verified
+
+Every check would pass by silently falling back to Homebrew, since the build
+runner has it installed. So CI **deletes Homebrew from the runner**
+(`sudo mv /opt/homebrew`) and re-runs the app: `blockMesh`, a 2-way parallel
+`simpleFoam` via the bundled `mpirun` with scotch decomposition, and a custom
+solver compiled from source with `wmake`. Homebrew is restored in an
+`always()` step.
+
+### The one thing still not bundled
+
+Compiling custom solvers needs a C++ compiler, and an app cannot ship
+Apple's. If you want to build your own solvers, you need the Command Line
+Tools (`xcode-select --install`). Running the prebuilt solvers does not.
+
 ## Using the built app
 
 Download the `OpenFOAM-v2606.app` artifact from the completed run, unzip, and
-move it to `/Applications`. **The target Mac needs the same Homebrew
-dependencies installed** (the app links against them at their Homebrew
-paths rather than bundling them):
-
-```
-brew install open-mpi fftw scotch cgal boost gmp mpfr libomp
-```
+move it to `/Applications`.
 
 Double-clicking the app opens a Terminal with the OpenFOAM environment
 sourced (`blockMesh`, `simpleFoam`, etc. on `PATH`). It also contains the

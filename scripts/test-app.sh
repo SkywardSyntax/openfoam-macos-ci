@@ -59,6 +59,15 @@ check "foamView helper executable"   test -x "$RES/pvbin/foamView"
 check "source tree shipped"          test -d "$FOAM/src"
 check "tutorials shipped"            test -d "$FOAM/tutorials"
 check "wmake toolchain shipped"      test -x "$FOAM/wmake/wmake"
+check "case-sensitive src.dmg shipped" test -f "$RES/src.dmg"
+grep -q '^LIB_SRC *?=' "$FOAM/wmake/makefiles/general" 2>/dev/null \
+  && ok "LIB_SRC is environment-overridable" \
+  || bad "LIB_SRC is environment-overridable" "wmake/makefiles/general still uses a plain ="
+
+# The plain src/ inside the app went through a case-insensitive filesystem, so
+# one file of each colliding pair is gone. The image must not have that damage.
+NINST="$(ls "$FOAM/src/OpenFOAM/db/Time/instant/" 2>/dev/null | wc -l | tr -d ' ')"
+printf '  ...in-app src/ db/Time/instant has %s entries (upstream has 5; case-folded)\n' "${NINST:-0}"
 
 # ---------------------------------------------------------------------------
 section "2. Self-containment"
@@ -111,6 +120,7 @@ bash -lc "
     echo \"MPIRUN=\$(command -v mpirun)\"
     echo \"PARAVIEW=\$(command -v paraview)\"
     echo \"FOAMVIEW=\$(command -v foamView)\"
+    echo \"LIB_SRC=\$LIB_SRC\"
     echo \"MPIEXEC=\$(command -v mpiexec)\"
   } > '$ENVFILE'
 " >/dev/null 2>&1
@@ -135,6 +145,19 @@ case "$(getenvv MPIRUN)" in "$APP"*) ok "mpirun resolves into the bundle";;
 case "$(getenvv PARAVIEW)" in "$APP"*) ok "paraview resolves into the bundle";;
   *) bad "paraview resolves into the bundle" "got '$(getenvv PARAVIEW)'";; esac
 [ -n "$(getenvv FOAMVIEW)" ] && ok "foamView on PATH" || bad "foamView on PATH"
+case "$(getenvv LIB_SRC)" in
+  "$FOAM/src") bad "LIB_SRC points at the case-sensitive image" "still the case-folded in-app copy";;
+  "")          bad "LIB_SRC points at the case-sensitive image" "unset -- src.dmg did not mount";;
+  *)           ok "LIB_SRC points at the case-sensitive image";;
+esac
+LS="$(getenvv LIB_SRC)"
+if [ -n "$LS" ] && [ -d "$LS/OpenFOAM/db/Time/instant" ]; then
+  n="$(ls "$LS/OpenFOAM/db/Time/instant/" | wc -l | tr -d ' ')"
+  [ "$n" -ge 5 ] && ok "case-colliding sources intact in the image ($n entries)" \
+                 || bad "case-colliding sources intact in the image" "only $n entries"
+else
+  bad "case-colliding sources intact in the image" "LIB_SRC/OpenFOAM not readable"
+fi
 # ParaView ships an MPICH mpiexec that must never shadow OpenFOAM's OpenMPI.
 case "$(getenvv MPIEXEC)" in
   *ParaView.app*) bad "ParaView MPICH does not shadow OpenMPI" "mpiexec=$(getenvv MPIEXEC)";;
@@ -389,12 +412,16 @@ bash -c "
 " > "$CBUILD" 2>&1
 # Only a binary that actually got built counts. Inferring success from the
 # absence of "error:" reported a pass when wmake had not run at all.
+# Now a required check: the case-sensitive src.dmg exists precisely so this
+# works. If it regresses, the headers this app ships are dead weight again.
 if grep -q COMPILE_PRODUCED_BINARY "$CBUILD"; then
-  ok "custom solver compiles (case-sensitivity limitation appears resolved)"
+  ok "custom solver compiles against the bundled headers"
 elif grep -q "didn't find libc++" "$CBUILD"; then
-  known "custom solver compile" "case-insensitive FS: lnInclude shadows libc headers (expected)"
+  bad "custom solver compiles against the bundled headers" \
+      "libc++ header shadowed -- LIB_SRC is not pointing at the case-sensitive image"
 else
-  known "custom solver compile" "did not build: $(grep -m1 -E 'error:|Error' "$CBUILD" | tr -s ' ' | cut -c1-160)"
+  bad "custom solver compiles against the bundled headers" \
+      "$(grep -m1 -E 'error:|Error' "$CBUILD" | tr -s ' ' | cut -c1-160)"
 fi
 rm -f "$CBUILD" "$BODY" "$OUT"
 rm -rf "$WORK"

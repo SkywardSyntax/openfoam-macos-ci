@@ -180,35 +180,44 @@ Three things make it meaningful rather than decorative:
   loaded Homebrew's `libmpi` over the bundled one, and only this check caught
   it.
 
-### Known limitation: compiling custom solvers
+### Compiling custom solvers, and the case-sensitivity problem
 
-Running the prebuilt solvers works with no Homebrew and no Xcode. **Building
-your own solver against the packaged app currently does not**, for a reason
-unrelated to Homebrew.
+OpenFOAM's `src/` contains **37 pairs of paths that differ only by case** —
+`instant.H`/`Instant.H`, `lduMatrix`/`LduMatrix`,
+`leastSquaresGrad`/`LeastSquaresGrad`. macOS volumes are case-insensitive by
+default, so copying that tree onto one silently merges every pair: one file of
+each is lost, and the colliding *directories* are flattened together.
 
-OpenFOAM's `lnInclude` directories contain headers named `wchar.H`,
-`time.H`, `string.H` and `complex.H`. On a case-insensitive filesystem —
-which is what every stock Mac uses — `#include <wchar.h>` resolves to
-OpenFOAM's C++ header instead of libc's, and the compile dies with:
+This affected the shipped app directly. `src/OpenFOAM/db/Time/instant/` has
+five files upstream and four in the app, and `lnInclude/Instant.H` was a
+broken symlink pointing at the `instant.H` that no longer existed. Compiling
+anything against it failed at the first `#include`:
 
 ```
 <cwchar> tried including <wchar.h> but didn't find libc++'s <wchar.h> header.
 ```
 
-This is exactly why step 2 of the build creates a **case-sensitive** APFS
-image to compile OpenFOAM in the first place. The hazard comes back as soon
-as the tree is packaged into a `.app` sitting on a normal volume, and
-bundling headers does not fix it — the compile fails before it ever reaches
-them. CI attempts the compile on every build and reports the result, but
-does not gate on it.
+It is not repairable after the fact — merged directories cannot be unmerged by
+copying files back. The source has to never touch a case-insensitive
+filesystem.
 
-Fixing this properly means putting the source tree on a case-sensitive
-volume on the user's machine — for example shipping a case-sensitive disk
-image the app mounts, or a setup command that creates one. That is not
-implemented yet.
+So `scripts/package-app.sh` builds **`Contents/Resources/src.dmg`**: a
+case-sensitive, compressed, read-only image populated straight from the
+case-sensitive build volume. Packaging fails if a colliding pair does not
+survive into it. At session start the app mounts it (`-nobrowse -readonly`,
+under `~/Library/Caches`) and points **`LIB_SRC`** at the mount.
 
-(Compiling would also need Apple's Command Line Tools, `xcode-select
---install`, since an app cannot ship a compiler.)
+`LIB_SRC` is the one lever that matters: `wmake/makefiles/general` defines
+every OpenFOAM include path from it, both the two wmake injects
+(`$(LIB_SRC)/OpenFOAM/lnInclude`, `$(LIB_SRC)/OSspecific/...`) and the
+`$(LIB_SRC)/...` entries in any `Make/options`. Packaging rewrites its plain
+`=` assignment to `?=` so the environment can override it.
+
+The acceptance suite compiles a real solver on every build and **fails if it
+does not build**, so this cannot silently regress.
+
+Compiling still needs Apple's Command Line Tools (`xcode-select --install`) —
+an app cannot ship a compiler. Running the prebuilt solvers does not.
 
 ## Using the built app
 

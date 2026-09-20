@@ -23,6 +23,52 @@ rsync -a \
   --exclude='/build' \
   "$FOAM_SRC_DIR"/ "$RES/$APP_NAME/"
 
+# ---------------------------------------------------------------------------
+# Case-sensitive source image.
+#
+# OpenFOAM's src/ holds 37 pairs of paths that differ only by case --
+# instant.H/Instant.H, lduMatrix/LduMatrix, leastSquaresGrad/LeastSquaresGrad.
+# Copying that onto a normal macOS volume silently merges every pair: one file
+# of each is lost and the colliding directories are flattened together. The
+# tree rsync'd above is damaged in exactly that way, which is why compiling
+# against it fails -- long before any bundled header is consulted.
+#
+# The build volume IS case-sensitive, so build the image straight from it and
+# never let the source touch the runner's disk. UDZO keeps it compressed and
+# read-only. At session start it is mounted and LIB_SRC points at it, and that
+# one variable drives every OpenFOAM include path (wmake/makefiles/general).
+echo "Building case-sensitive source image..."
+SRC_STAGE="$(mktemp -d)"
+hdiutil create -size 1g -fs 'Case-sensitive APFS' -volname OpenFOAM-src -quiet \
+  "$SRC_STAGE/rw.sparseimage"
+SRC_MNT="$SRC_STAGE/mnt"; mkdir -p "$SRC_MNT"
+hdiutil attach "$SRC_STAGE/rw.sparseimage" -nobrowse -noverify -noautoopen \
+  -mountpoint "$SRC_MNT" -quiet
+rsync -a "$FOAM_SRC_DIR/src/" "$SRC_MNT/"
+
+# Prove the collisions survived; a merged pair means the image is as damaged
+# as the plain copy and there is no point shipping it.
+_instants="$(ls "$SRC_MNT/OpenFOAM/db/Time/instant/" 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${_instants:-0}" -lt 5 ]; then
+  echo "FAIL: case-colliding files were lost building the source image" \
+       "(expected >=5 entries in db/Time/instant, found ${_instants:-0})"
+  hdiutil detach "$SRC_MNT" -quiet || true
+  exit 1
+fi
+echo "  case collisions preserved (db/Time/instant: $_instants entries)"
+
+hdiutil detach "$SRC_MNT" -quiet
+hdiutil convert "$SRC_STAGE/rw.sparseimage" -format UDZO -quiet -o "$RES/src.dmg"
+rm -rf "$SRC_STAGE"
+echo "  src.dmg: $(du -sh "$RES/src.dmg" | cut -f1)"
+
+# LIB_SRC is a plain `=` assignment, which an environment variable cannot
+# override. `?=` lets the session rcfile redirect it at the mounted image.
+sed -i '' 's|^LIB_SRC[[:space:]]*=[[:space:]]*\$(WM_PROJECT_DIR)/src|LIB_SRC        ?= $(WM_PROJECT_DIR)/src|' \
+  "$RES/$APP_NAME/wmake/makefiles/general"
+grep -q '^LIB_SRC *?=' "$RES/$APP_NAME/wmake/makefiles/general" \
+  || { echo "FAIL: could not make LIB_SRC overridable"; exit 1; }
+
 # Bundle the Homebrew-provided dependencies (dylibs, the MPI runtime and
 # headers) so the shipped app needs no Homebrew at all. Must run before the
 # code-signing step below: it rewrites install names, which invalidates
@@ -200,6 +246,27 @@ if [ -n "${FOAMAPP_DEPS:-}" ]; then
   DYLD_LIBRARY_PATH="$FOAMAPP_DEPS/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
   export DYLD_LIBRARY_PATH
 
+fi
+
+# Case-sensitive source image, for compiling custom solvers.
+#
+# The src/ copied into the app went through a case-insensitive filesystem and
+# lost one file from each of OpenFOAM's 37 case-colliding pairs, with the
+# colliding directories flattened together. src.dmg carries an intact copy,
+# built on the case-sensitive build volume. Mounting it and pointing LIB_SRC
+# there is what makes `wmake` work: that single variable feeds every OpenFOAM
+# include path, both the ones wmake injects and $(LIB_SRC)/... in Make/options.
+if [ -f "$_res/src.dmg" ]; then
+  _srcmnt="$HOME/Library/Caches/__APP_NAME__-src"
+  if [ ! -d "$_srcmnt/OpenFOAM/lnInclude" ]; then
+    mkdir -p "$_srcmnt" 2>/dev/null
+    hdiutil attach "$_res/src.dmg" -nobrowse -noverify -noautoopen -readonly \
+      -mountpoint "$_srcmnt" >/dev/null 2>&1
+  fi
+  if [ -d "$_srcmnt/OpenFOAM/lnInclude" ]; then
+    export LIB_SRC="$_srcmnt"
+  fi
+  unset _srcmnt
 fi
 
 # Bundled ParaView front-end tools, if present. Deliberately a shim dir holding

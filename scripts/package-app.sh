@@ -223,7 +223,7 @@ printf '  %sSolvers run inside a case directory%s%s, not here. Start one:%s\n' \
 printf '    %scp -r $FOAM_TUTORIALS/incompressible/simpleFoam/pitzDaily .%s\n' "$_o" "$_r"
 printf '    %scd pitzDaily && blockMesh && simpleFoam%s\n\n' "$_o" "$_r"
 printf '  %scommon%s     blockMesh  snappyHexMesh  simpleFoam  decomposePar\n' "$_d" "$_r"
-printf '  %s           foamInfo <name>%s  docs for any solver or utility\n' "$_d" "$_r"
+printf '  %s           <name> -help%s   usage for any solver or utility\n' "$_d" "$_r"
 if command -v foamView >/dev/null 2>&1; then
   printf '  %sview%s       %sfoamView%s  open this case in ParaView, applied, at the last time\n' \
     "$_d" "$_r" "$_o" "$_r"

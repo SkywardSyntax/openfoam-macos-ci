@@ -146,12 +146,32 @@ that — the install names were already rewritten — but the compile path does.
 
 ### How this is verified
 
-Every check would pass by silently falling back to Homebrew, since the build
-runner has it installed. So CI **deletes Homebrew from the runner**
-(`sudo mv /opt/homebrew`) and re-runs the app: `blockMesh`, a 2-way parallel
-`simpleFoam` via the bundled `mpirun` with scotch decomposition, and a custom
-solver compiled from source with `wmake`. Homebrew is restored in an
-`always()` step.
+`scripts/test-app.sh` is an acceptance suite that runs on every build and can
+be run by hand against any installed copy:
+
+```
+APP=/Applications/OpenFOAM-v2606.app scripts/test-app.sh
+```
+
+It checks bundle structure, self-containment (no Mach-O referencing
+`/opt/homebrew`, valid code signatures), the session environment, ~50 shipped
+executables, which libraries dyld *actually* maps at runtime, then runs
+`blockMesh`, `checkMesh`, `simpleFoam`, `potentialFoam`, `pimpleFoam`, all four
+decomposition methods (scotch, metis, kahip, hierarchical), a 2-way parallel
+solve with `reconstructPar`, and the ParaView reader through `pvpython`.
+
+Three things make it meaningful rather than decorative:
+
+- **Homebrew is deleted from the runner** (`sudo mv /opt/homebrew`) before it
+  runs, and restored in an `always()` step. Otherwise every check could pass
+  by quietly falling back to it.
+- **It tests the unzipped release artifact at a different path**, not the build
+  directory. That covers the zip round-trip (`pvbin` and `lnInclude` are
+  symlinks) and proves the app is relocatable.
+- **It checks what dyld actually maps**, not just install names. Correct
+  install names were not sufficient: a stale `DYLD_LIBRARY_PATH` entry once
+  loaded Homebrew's `libmpi` over the bundled one, and only this check caught
+  it.
 
 ### Known limitation: compiling custom solvers
 

@@ -17,6 +17,7 @@ on:
       - 'scripts/configure.sh'
       - 'scripts/package-app.sh'
       - 'scripts/bundle-deps.sh'
+      - 'scripts/test-app.sh'
       - 'icon/**'
 
 # One build per OpenFOAM version. The hourly release watcher also refuses to
@@ -199,120 +200,37 @@ jobs:
             "$GITHUB_WORKSPACE/scripts/package-app.sh"
           du -sh "$GITHUB_WORKSPACE/dist/${APP_NAME}.app"
 
-      - name: Verify bundled ParaView through the real user session
+      - name: Zip .app
         run: |
-          APP_RES="$GITHUB_WORKSPACE/dist/${APP_NAME}.app/Contents/Resources"
-          run_dir=$(mktemp -d)
-          cp -r "$FOAM_SRC_DIR/tutorials/incompressible/simpleFoam/pitzDaily" "$run_dir/case"
+          cd "$GITHUB_WORKSPACE/dist"
+          zip -qr --symlinks "${APP_NAME}-macos-arm64.zip" "${APP_NAME}.app"
+          ls -lh "${APP_NAME}-macos-arm64.zip"
 
-          cat > /tmp/pvcheck.py <<'PY'
-          from paraview.simple import OpenFOAMReader
-          r = OpenFOAMReader(FileName='case.foam'); r.UpdatePipeline()
-          d = r.GetDataInformation()
-          assert d.GetNumberOfCells() > 0, 'reader returned an empty mesh'
-          print('PARAVIEW_READER_OK cells=%d' % d.GetNumberOfCells())
-          PY
-
-          # Exercise exactly what a user gets when they open the app.
-          /bin/bash --rcfile "$APP_RES/openfoam-session.sh" -i -c "
-            set -x
-            cd '$run_dir/case' || exit 1
-            blockMesh > /dev/null || exit 1
-            touch case.foam
-            command -v paraview | grep -q '$APP_RES/pvbin' \
-              || { echo 'FAIL: paraview does not resolve to the bundle'; exit 1; }
-            command -v mpirun | grep -q '/deps/bin' \
-              || { echo 'FAIL: mpirun does not resolve to the bundled Open MPI'; exit 1; }
-            command -v foamView >/dev/null \
-              || { echo 'FAIL: foamView helper missing'; exit 1; }
-            pvpython /tmp/pvcheck.py || exit 1
-          " 2>&1 | tee /tmp/pvcheck.log
-
-          grep -q PARAVIEW_READER_OK /tmp/pvcheck.log \
-            || { echo "ParaView verification did not succeed"; exit 1; }
+      # Test what a user actually downloads, unpacked somewhere else. That
+      # covers the zip round-trip (pvbin and lnInclude are symlinks) and proves
+      # the app is relocatable: everything inside has to resolve through
+      # @loader_path and $_res, never the directory it happened to be built in.
+      # The original is removed rather than kept -- the app is 2.3G and the
+      # runner does not have room for two copies. Only the zip is published.
+      - name: Unpack the release zip to a clean location
+        run: |
+          rm -rf /Users/runner/installed && mkdir -p /Users/runner/installed
+          cd /Users/runner/installed
+          unzip -q "$GITHUB_WORKSPACE/dist/${APP_NAME}-macos-arm64.zip"
+          rm -rf "$GITHUB_WORKSPACE/dist/${APP_NAME}.app"
+          du -sh "/Users/runner/installed/${APP_NAME}.app"
+          df -h /Users/runner | tail -1
 
       - name: Hide Homebrew
         run: sudo mv /opt/homebrew /opt/homebrew-hidden
 
-      # The runner has Homebrew installed, so every check up to here could pass
-      # by silently falling back to it. This is the only test that actually
-      # proves the bundle stands alone: same app, no /opt/homebrew on disk.
-      - name: Verify the app with no Homebrew present
-        id: nobrew
+      # The runner has Homebrew installed, so without this every check could
+      # pass by quietly falling back to it. scripts/test-app.sh exits non-zero
+      # if any required check fails, so it is the gate on its own.
+      - name: Acceptance suite (no Homebrew, relocated app)
         run: |
-          set +e
-          APP_RES="$GITHUB_WORKSPACE/dist/${APP_NAME}.app/Contents/Resources"
-          run_dir=$(mktemp -d)
-          cp -r "$FOAM_SRC_DIR/tutorials/incompressible/simpleFoam/pitzDaily" "$run_dir/case"
-
-          # scotch decomposition deliberately: libscotch is one of the dylibs
-          # whose install name was rewritten, so this exercises it.
-          cat > "$run_dir/case/system/decomposeParDict" <<'DPD'
-          FoamFile { version 2.0; format ascii; class dictionary; object decomposeParDict; }
-          numberOfSubdomains 2;
-          method scotch;
-          DPD
-
-          # A custom solver. Informational: see the case-sensitivity note below.
-          mkdir -p "$run_dir/myApp/Make"
-          cat > "$run_dir/myApp/myApp.C" <<'CPP'
-          #include "fvCFD.H"
-          int main(int argc, char *argv[])
-          {
-              #include "setRootCase.H"
-              #include "createTime.H"
-              Info<< "CUSTOM_SOLVER_OK t=" << runTime.timeName() << endl;
-              return 0;
-          }
-          CPP
-          printf 'myApp.C\nEXE = $(FOAM_USER_APPBIN)/myApp\n' > "$run_dir/myApp/Make/files"
-          printf 'EXE_INC = -I$(LIB_SRC)/finiteVolume/lnInclude -I$(LIB_SRC)/meshTools/lnInclude\nEXE_LIBS = -lfiniteVolume -lmeshTools\n' \
-            > "$run_dir/myApp/Make/options"
-
-          /bin/bash --rcfile "$APP_RES/openfoam-session.sh" -i -c "
-            command -v brew && { echo 'FAIL: brew still reachable, test is invalid'; exit 1; }
-
-            cd '$run_dir/case' || exit 1
-            blockMesh > /dev/null || { echo 'FAIL: blockMesh'; exit 1; }
-            echo NOBREW_BLOCKMESH_OK
-
-            # Parallel run: exercises the relocated Open MPI and PRRTE.
-            # Output is kept -- suppressing it once already cost a full CI
-            # cycle that reported only that something failed.
-            echo '--- parallel diagnostics ---'
-            echo FOAM_MPI=\$FOAM_MPI
-            echo MPI_ARCH_PATH=\$MPI_ARCH_PATH
-            echo mpirun=\$(command -v mpirun)
-            echo DYLD_LIBRARY_PATH=\$DYLD_LIBRARY_PATH
-            decomposePar -force > /tmp/dp.log 2>&1; echo decomposePar rc=\$?
-            tail -6 /tmp/dp.log
-            mpirun -np 2 simpleFoam -parallel > /tmp/par.log 2>&1; echo mpirun rc=\$?
-            tail -8 /tmp/par.log
-            grep -q 'Finalising parallel run' /tmp/par.log && echo NOBREW_PARALLEL_OK
-
-            cd '$run_dir/myApp' || exit 1
-            wmake 2>&1 | tail -5
-            \$FOAM_USER_APPBIN/myApp -case '$run_dir/case' 2>&1 | grep CUSTOM_SOLVER_OK \
-              || { echo 'FAIL: custom solver did not build/run'; exit 1; }
-          " 2>&1 | tee /tmp/nobrew.log
-          echo "---- required markers ----"
-          for m in NOBREW_BLOCKMESH_OK NOBREW_PARALLEL_OK; do
-            grep -q "$m" /tmp/nobrew.log && echo "OK   $m" || { echo "MISS $m"; echo "fail=1" >> "$GITHUB_OUTPUT"; }
-          done
-
-          # Informational only, and expected to fail. Compiling against the
-          # packaged app is blocked by something unrelated to Homebrew:
-          # OpenFOAM's lnInclude dirs contain wchar.H, time.H, string.H and
-          # complex.H, so on a case-insensitive filesystem -- which is every
-          # stock Mac -- #include <wchar.h> resolves to OpenFOAM's C++ header
-          # instead of libc's. That is why the build itself runs on a
-          # case-sensitive sparseimage. Bundling headers does not fix it.
-          if grep -q CUSTOM_SOLVER_OK /tmp/nobrew.log; then
-            echo "OK   CUSTOM_SOLVER_OK (case-sensitivity limitation appears resolved)"
-          else
-            echo "KNOWN custom solver compile fails: lnInclude shadows libc headers"
-            echo "      on a case-insensitive filesystem. Not gated on."
-          fi
+          APP="/Users/runner/installed/${APP_NAME}.app" APP_NAME="$APP_NAME" \
+            "$GITHUB_WORKSPACE/scripts/test-app.sh"
 
       - name: Restore Homebrew
         if: always()
@@ -323,17 +241,6 @@ jobs:
           else
             echo "Nothing to restore (it was never hidden)."
           fi
-
-      - name: Fail if the no-Homebrew verification did not pass
-        if: steps.nobrew.outputs.fail == '1'
-        run: |
-          echo "The app still depends on Homebrew — see the 'Verify the app with no Homebrew present' log."
-          exit 1
-
-      - name: Zip .app
-        run: |
-          cd "$GITHUB_WORKSPACE/dist"
-          zip -r --symlinks "${APP_NAME}-macos-arm64.zip" "${APP_NAME}.app"
 
       - name: Upload app artifact
         uses: actions/upload-artifact@v4

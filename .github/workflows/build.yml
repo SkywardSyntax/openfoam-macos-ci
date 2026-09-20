@@ -277,10 +277,18 @@ jobs:
             echo NOBREW_BLOCKMESH_OK
 
             # Parallel run: exercises the relocated Open MPI and PRRTE.
-            decomposePar -force > /dev/null 2>&1 \
-              && mpirun -np 2 simpleFoam -parallel > /dev/null 2>&1 \
-              && echo NOBREW_PARALLEL_OK \
-              || echo 'WARN: parallel run did not complete'
+            # Output is kept -- suppressing it once already cost a full CI
+            # cycle that reported only that something failed.
+            echo '--- parallel diagnostics ---'
+            echo FOAM_MPI=\$FOAM_MPI
+            echo MPI_ARCH_PATH=\$MPI_ARCH_PATH
+            echo mpirun=\$(command -v mpirun)
+            echo DYLD_LIBRARY_PATH=\$DYLD_LIBRARY_PATH
+            decomposePar -force > /tmp/dp.log 2>&1; echo decomposePar rc=\$?
+            tail -6 /tmp/dp.log
+            mpirun -np 2 simpleFoam -parallel > /tmp/par.log 2>&1; echo mpirun rc=\$?
+            tail -8 /tmp/par.log
+            grep -q 'Finalising parallel run' /tmp/par.log && echo NOBREW_PARALLEL_OK
 
             cd '$run_dir/myApp' || exit 1
             wmake 2>&1 | tail -5

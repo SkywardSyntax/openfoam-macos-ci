@@ -186,6 +186,18 @@ if [ -n "${_deps:-}" ]; then
          GMP_ARCH_PATH="$_deps"    MPFR_ARCH_PATH="$_deps" \
          SCOTCH_ARCH_PATH="$_deps" FFTW_ARCH_PATH="$_deps" \
          MPI_ARCH_PATH="$_deps"
+
+  # etc/config.sh/mpi appends $MPI_ARCH_PATH/lib to DYLD_LIBRARY_PATH while it
+  # sources, and at that point MPI_ARCH_PATH can still be a Homebrew path.
+  # DYLD_LIBRARY_PATH takes precedence over @rpath, so on a machine that has
+  # Homebrew installed the app would load Homebrew's libmpi instead of the one
+  # it was built and tested against -- silently, and with a version that may
+  # not match. Strip Homebrew out and put the bundle first: the bundle wins.
+  DYLD_LIBRARY_PATH="$(printf %s "${DYLD_LIBRARY_PATH:-}" | tr ':' '\n' \
+    | grep -v -e '^/opt/homebrew' -e '/Homebrew/' | paste -sd: -)"
+  DYLD_LIBRARY_PATH="$_deps/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+  export DYLD_LIBRARY_PATH
+
   unset _deps
 fi
 
